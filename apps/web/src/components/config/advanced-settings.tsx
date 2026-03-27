@@ -30,7 +30,9 @@ export function AdvancedSettings() {
   } = useTranslationStore()
   const [isOpen, setIsOpen] = useState(false)
 
-  if (preset !== 'maximum' || connectionStatus !== 'connected') return null
+  if (connectionStatus !== 'connected') return null
+
+  const isMaximum = preset === 'maximum'
 
   return (
     <div className="rounded-lg border border-border">
@@ -44,29 +46,7 @@ export function AdvancedSettings() {
 
       {isOpen && (
         <div className="border-t border-border p-4 space-y-4">
-          {/* Analysis toggle */}
-          <label className="flex items-center justify-between">
-            <span className="text-sm">Analysis phase</span>
-            <input
-              type="checkbox"
-              checked={enableAnalysis}
-              onChange={(e) => setEnableAnalysis(e.target.checked)}
-              className="rounded"
-            />
-          </label>
-
-          {/* Review toggle */}
-          <label className="flex items-center justify-between">
-            <span className="text-sm">Review phase</span>
-            <input
-              type="checkbox"
-              checked={enableReview}
-              onChange={(e) => setEnableReview(e.target.checked)}
-              className="rounded"
-            />
-          </label>
-
-          {/* Bilingual output */}
+          {/* Bilingual output — available for all modes */}
           <label className="flex items-center justify-between">
             <span className="text-sm">Bilingual output</span>
             <input
@@ -77,7 +57,21 @@ export function AdvancedSettings() {
             />
           </label>
 
-          {/* Analysis model */}
+          {/* Tone — available for all modes */}
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">
+              Tone preference (optional)
+            </label>
+            <input
+              type="text"
+              value={tonePreference}
+              onChange={(e) => setTonePreference(e.target.value)}
+              placeholder="e.g., informal, formal, neutral"
+              className="w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          {/* Model overrides — available for all modes */}
           {enableAnalysis && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">
@@ -96,7 +90,6 @@ export function AdvancedSettings() {
             </div>
           )}
 
-          {/* Review model */}
           {enableReview && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">
@@ -115,64 +108,76 @@ export function AdvancedSettings() {
             </div>
           )}
 
-          {/* Chunk size */}
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">
-              Chunk size: {chunkSize} cues
-            </label>
-            <input
-              type="range"
-              min={4}
-              max={30}
-              value={chunkSize}
-              onChange={(e) => setChunkSize(Number(e.target.value))}
-              className="w-full"
-            />
-          </div>
-
-          {/* Context */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">
-                Lookbehind: {lookbehind}
+          {/* Maximum-mode-only controls */}
+          {isMaximum && (
+            <>
+              {/* Analysis/Review toggles */}
+              <label className="flex items-center justify-between">
+                <span className="text-sm">Analysis phase</span>
+                <input
+                  type="checkbox"
+                  checked={enableAnalysis}
+                  onChange={(e) => setEnableAnalysis(e.target.checked)}
+                  className="rounded"
+                />
               </label>
-              <input
-                type="range"
-                min={0}
-                max={10}
-                value={lookbehind}
-                onChange={(e) => setLookbehind(Number(e.target.value))}
-                className="w-full"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">
-                Lookahead: {lookahead}
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={10}
-                value={lookahead}
-                onChange={(e) => setLookahead(Number(e.target.value))}
-                className="w-full"
-              />
-            </div>
-          </div>
 
-          {/* Tone */}
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">
-              Tone preference (optional)
-            </label>
-            <input
-              type="text"
-              value={tonePreference}
-              onChange={(e) => setTonePreference(e.target.value)}
-              placeholder="e.g., informal, formal, neutral"
-              className="w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
+              <label className="flex items-center justify-between">
+                <span className="text-sm">Review phase</span>
+                <input
+                  type="checkbox"
+                  checked={enableReview}
+                  onChange={(e) => setEnableReview(e.target.checked)}
+                  className="rounded"
+                />
+              </label>
+
+              {/* Chunk size */}
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">
+                  Chunk size: {chunkSize} cues
+                </label>
+                <input
+                  type="range"
+                  min={4}
+                  max={100}
+                  value={chunkSize}
+                  onChange={(e) => setChunkSize(Number(e.target.value))}
+                  className="w-full"
+                />
+              </div>
+
+              {/* Context */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">
+                    Lookbehind: {lookbehind}
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={10}
+                    value={lookbehind}
+                    onChange={(e) => setLookbehind(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">
+                    Lookahead: {lookahead}
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={10}
+                    value={lookahead}
+                    onChange={(e) => setLookahead(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

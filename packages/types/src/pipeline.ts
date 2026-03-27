@@ -46,7 +46,7 @@ export const PipelineConfigSchema = z.object({
   enableAnalysis: z.boolean().optional(),
   enableReview: z.boolean().optional(),
   bilingualOutput: z.boolean().optional(),
-  chunkSize: z.number().int().min(4).max(50).optional(),
+  chunkSize: z.number().int().min(4).max(100).optional(),
   lookbehind: z.number().int().min(0).max(10).optional(),
   lookahead: z.number().int().min(0).max(10).optional(),
   tonePreference: z.string().optional(),

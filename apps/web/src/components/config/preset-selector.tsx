@@ -16,6 +16,8 @@ export function PresetSelector() {
 
   if (!file) return null
 
+  const selectedConfig = PRESETS[preset]
+
   return (
     <div>
       <label className="text-xs font-medium text-muted-foreground mb-2 block">Quality Mode</label>
@@ -41,6 +43,9 @@ export function PresetSelector() {
           ),
         )}
       </div>
+      {selectedConfig && (
+        <p className="text-xs text-muted-foreground mt-2">{selectedConfig.description}</p>
+      )}
     </div>
   )
 }

@@ -23,9 +23,7 @@ export function augmentPromptForJson(promptText: string, schema: Record<string, 
     '\n\n' +
     'IMPORTANT: You MUST respond with valid JSON only. No markdown fences, no explanations, no text outside the JSON.\n' +
     'Your response must conform to this JSON schema:\n' +
-    '```json\n' +
-    schemaDesc +
-    '\n```'
+    schemaDesc
   )
 }
 
@@ -94,12 +92,12 @@ export function isStructuredOutputError(error: unknown): boolean {
     if (pipelineError?.code === 'STRUCTURED_OUTPUT_FAIL') return true
 
     const message = (pipelineError?.message ?? '') + (pipelineError?.details ?? '')
-    return /json.mode|json_schema|response_format|structured.output/i.test(message)
+    return /json.mode|json_schema|response_format|structured.output|unsupported.parameter|unknown.parameter.*format|does not support.*json|invalid.*response_format/i.test(message)
   }
 
   // Check plain Error
   if (error instanceof Error) {
-    return /json.mode|json_schema|response_format|structured.output/i.test(error.message)
+    return /json.mode|json_schema|response_format|structured.output|unsupported.parameter|unknown.parameter.*format|does not support.*json|invalid.*response_format/i.test(error.message)
   }
 
   return false

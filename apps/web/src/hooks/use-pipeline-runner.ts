@@ -2,8 +2,11 @@
 
 import { useEffect, useRef } from 'react'
 import { useTranslationStore } from '@/stores/translation-store'
+import { createTranslationMemoryStore } from '@/lib/translation-memory-store'
 import { PipelineOrchestrator } from '@srtora/pipeline'
 import type { PipelineConfig, ProgressEvent } from '@srtora/types'
+
+const memoryStore = createTranslationMemoryStore()
 
 /**
  * Hook that subscribes to store triggers and runs the pipeline.
@@ -30,6 +33,17 @@ export function usePipelineRunner() {
         ? { ...provider, apiKey }
         : provider
 
+      // Load translation memory if enabled
+      const languagePair = `${state.sourceLanguage}->${state.targetLanguage}`
+      let translationMemory = undefined
+      if (state.translationMemoryEnabled) {
+        try {
+          translationMemory = await memoryStore.getMemory(languagePair)
+        } catch {
+          // Memory load failure is non-fatal
+        }
+      }
+
       const config: PipelineConfig = {
         sourceLanguage: state.sourceLanguage,
         targetLanguage: state.targetLanguage,
@@ -47,6 +61,8 @@ export function usePipelineRunner() {
         qualityMode: state.preset,
         // Only pass explicit chunkSize if in maximum mode (user control)
         ...(state.preset === 'maximum' ? { chunkSize: state.chunkSize } : {}),
+        // Translation memory
+        ...(translationMemory ? { translationMemory } : {}),
       }
 
       const abortController = new AbortController()
@@ -67,6 +83,38 @@ export function usePipelineRunner() {
 
         if (!abortController.signal.aborted) {
           useTranslationStore.getState().completeTranslation(result)
+
+          // Persist memory updates from session results
+          if (state.translationMemoryEnabled && result.sessionMemory) {
+            try {
+              const now = new Date().toISOString()
+              const { speakers, terms } = result.sessionMemory
+
+              if (terms.length > 0) {
+                await memoryStore.addTerms(
+                  terms.map((t) => ({
+                    ...t,
+                    confidence: 1,
+                    createdAt: now,
+                    updatedAt: now,
+                    languagePair,
+                  })),
+                )
+              }
+              if (speakers.length > 0) {
+                await memoryStore.addSpeakers(
+                  speakers.map((s) => ({
+                    ...s,
+                    sourceFiles: [file.filename],
+                    createdAt: now,
+                    updatedAt: now,
+                  })),
+                )
+              }
+            } catch {
+              // Memory persist failure is non-fatal
+            }
+          }
         }
       } catch (error: unknown) {
         if (abortController.signal.aborted) {
@@ -98,3 +146,6 @@ export function usePipelineRunner() {
     }
   }, [cancelTrigger])
 }
+
+/** Expose the memory store for use by the memory panel */
+export { memoryStore }

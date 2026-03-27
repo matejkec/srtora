@@ -12,15 +12,10 @@ describe('calculateAdaptiveChunkSize', () => {
     outputStrategy: 'structured' as const,
   }
 
-  it('returns clamped minimum with unknown context window', () => {
+  it('returns a valid chunk size with unknown context window', () => {
     const result = calculateAdaptiveChunkSize(baseParams)
-    // With 4096 * 0.6 = 2457 available
-    // Overhead: 400 + 200 + 100 + (6 * 20) = 820
-    // Target budget: 2457 - 820 = 1637
-    // Input budget: 1637 * 0.6 = 982
-    // Chunk size: floor(982 / 20) = 49
     expect(result).toBeGreaterThanOrEqual(4)
-    expect(result).toBeLessThanOrEqual(50)
+    expect(result).toBeLessThanOrEqual(50) // default max (no totalCues)
   })
 
   it('returns larger chunk size with large context window', () => {
@@ -29,11 +24,12 @@ describe('calculateAdaptiveChunkSize', () => {
     expect(largeCtx).toBeGreaterThanOrEqual(smallCtx)
   })
 
-  it('returns 50 (max) for very large context windows', () => {
+  it('returns max for very large context windows', () => {
     const result = calculateAdaptiveChunkSize({
       ...baseParams,
       contextWindow: 1048576,
     })
+    // Default max is 50 when totalCues not provided
     expect(result).toBe(50)
   })
 
@@ -91,6 +87,66 @@ describe('calculateAdaptiveChunkSize', () => {
     })
     expect(result).toBeGreaterThanOrEqual(structured)
   })
+
+  // New Phase 2 tests
+
+  it('uses custom systemPromptOverhead', () => {
+    const small = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 4096,
+      systemPromptOverhead: 100,
+    })
+    const large = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 4096,
+      systemPromptOverhead: 1000,
+    })
+    expect(small).toBeGreaterThan(large)
+  })
+
+  it('applies maxOutputTokens constraint', () => {
+    // Very large context but small maxOutputTokens
+    const result = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 1048576,
+      maxOutputTokens: 100,
+      avgCueTokens: 20,
+    })
+    // maxOutputTokens 100 / avgCueTokens 20 = 5
+    expect(result).toBeLessThanOrEqual(5)
+    expect(result).toBeGreaterThanOrEqual(4) // clamped to min
+  })
+
+  it('dynamic max is 75 for 100+ cue documents', () => {
+    const result = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 1048576,
+      totalCues: 150,
+    })
+    expect(result).toBe(75)
+  })
+
+  it('dynamic max is 100 for 500+ cue documents', () => {
+    const result = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 1048576,
+      totalCues: 600,
+    })
+    expect(result).toBe(100)
+  })
+
+  it('null maxOutputTokens does not constrain', () => {
+    const withNull = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 128000,
+      maxOutputTokens: null,
+    })
+    const without = calculateAdaptiveChunkSize({
+      ...baseParams,
+      contextWindow: 128000,
+    })
+    expect(withNull).toBe(without)
+  })
 })
 
 describe('estimateAvgCueTokens', () => {
@@ -132,5 +188,37 @@ describe('estimateAvgCueTokens', () => {
     const result = estimateAvgCueTokens(doc)
     // 107 chars / 4 = 26.75, ceil = 27
     expect(result).toBeGreaterThan(20)
+  })
+
+  it('uses language-aware estimation for CJK', () => {
+    // Use longer text so the result exceeds the min(5) floor
+    const cjkText = '这是一个比较长的中文字幕行，包含了更多的中文字符用于测试'
+    const doc: SubtitleDocument = {
+      format: 'srt',
+      sourceFilename: 'test.srt',
+      cues: [
+        { sequence: 1, startMs: 0, endMs: 1000, rawText: cjkText, textLines: [cjkText], plainText: cjkText, inlineTags: [] },
+      ],
+      cueCount: 1,
+    }
+    const zhResult = estimateAvgCueTokens(doc, 'zh')
+    const enResult = estimateAvgCueTokens(doc, 'en')
+    // Chinese text should produce more tokens (fewer chars per token)
+    expect(zhResult).toBeGreaterThan(enResult)
+  })
+
+  it('defaults to 4 chars/token without language', () => {
+    const doc: SubtitleDocument = {
+      format: 'srt',
+      sourceFilename: 'test.srt',
+      cues: [
+        { sequence: 1, startMs: 0, endMs: 1000, rawText: '12345678', textLines: ['12345678'], plainText: '12345678', inlineTags: [] },
+      ],
+      cueCount: 1,
+    }
+    // 8 chars / 4 = 2, but min is 5
+    expect(estimateAvgCueTokens(doc)).toBe(5)
+    // Same without language
+    expect(estimateAvgCueTokens(doc, undefined)).toBe(5)
   })
 })

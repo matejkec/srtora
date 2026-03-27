@@ -45,6 +45,7 @@ import {
   translationOutputSchema,
   analysisOutputSchema,
   reviewOutputSchema,
+  estimatePromptOverhead,
 } from '@srtora/prompts'
 import type { PromptStrategy } from '@srtora/prompts'
 import { ProgressTracker } from './progress-tracker.js'
@@ -86,6 +87,13 @@ export class PipelineOrchestrator {
   private effectiveMaxRetries: number
   /** Quality mode context usage target */
   private contextUsageTarget: number
+
+  /** Cumulative parse failure count — triggers chunk size reduction after threshold */
+  private parseFailureCount = 0
+  /** Parse failure threshold before reducing chunk size */
+  private static readonly PARSE_FAILURE_THRESHOLD = 3
+  /** Chunk size reduction factor after hitting parse failure threshold */
+  private static readonly CHUNK_SIZE_REDUCTION = 0.7
 
   /** Reasonable max tokens to prevent truncation on servers with low defaults (e.g. MLX 256) */
   private static readonly MAX_COMPLETION_TOKENS = 4096
@@ -187,20 +195,6 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
-    // === Adaptive chunk sizing ===
-    const qualityMode = this.config.qualityMode ? QUALITY_MODES[this.config.qualityMode] : undefined
-    if (qualityMode?.chunkSizingStrategy === 'adaptive' || (!this.config.chunkSize && this.modelCaps)) {
-      const avgCueTokens = estimateAvgCueTokens(document)
-      this.effectiveChunkSize = calculateAdaptiveChunkSize({
-        contextWindow: this.modelCaps?.contextWindow ?? null,
-        avgCueTokens,
-        lookbehind: this.effectiveLookbehind,
-        lookahead: this.effectiveLookahead,
-        contextUsageTarget: this.contextUsageTarget,
-        outputStrategy: this.outputStrategy,
-      })
-    }
-
     // === Merge translation memory ===
     const languagePair = `${this.config.sourceLanguage}->${this.config.targetLanguage}`
     let corrections: CorrectionEntry[] = []
@@ -213,6 +207,29 @@ export class PipelineOrchestrator {
         languagePair,
       )
       corrections = getRelevantCorrections(this.config.translationMemory, languagePair)
+    }
+
+    // === Adaptive chunk sizing ===
+    const qualityMode = this.config.qualityMode ? QUALITY_MODES[this.config.qualityMode] : undefined
+    if (qualityMode?.chunkSizingStrategy === 'adaptive' || (!this.config.chunkSize && this.modelCaps)) {
+      const avgCueTokens = estimateAvgCueTokens(document, this.config.sourceLanguage)
+      const promptOverhead = estimatePromptOverhead({
+        speakerCount: initialSessionMemory?.speakers.length ?? 0,
+        termCount: initialSessionMemory?.terms.length ?? 0,
+        correctionCount: corrections.length,
+        hasTonePreference: !!this.config.tonePreference,
+      })
+      this.effectiveChunkSize = calculateAdaptiveChunkSize({
+        contextWindow: this.modelCaps?.contextWindow ?? null,
+        avgCueTokens,
+        lookbehind: this.effectiveLookbehind,
+        lookahead: this.effectiveLookahead,
+        contextUsageTarget: this.contextUsageTarget,
+        outputStrategy: this.outputStrategy,
+        systemPromptOverhead: promptOverhead,
+        maxOutputTokens: this.modelCaps?.maxOutputTokens ?? null,
+        totalCues: document.cues.length,
+      })
     }
 
     // === Phase 1: Analyze (optional) ===
@@ -336,37 +353,16 @@ export class PipelineOrchestrator {
 
         const messages = this.strategy.formatMessages(system, user)
 
-        const response = await withRetry(
-          async () => {
-            const resp = await this.chatWithFallback(
-              {
-                model: this.config.translationModel,
-                messages,
-                jsonSchema: translationOutputSchema,
-                maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-                signal: this.signal,
-              },
-              tracker,
-            )
-
-            const parsed = this.parseTranslationResponse(resp, chunk)
-            if (!parsed) {
-              throw new PipelineException({
-                code: 'STRUCTURED_OUTPUT_FAIL',
-                message: `Failed to parse translation response for ${chunk.chunkId}`,
-                phase: 'translating',
-                chunkId: chunk.chunkId,
-                recoverable: true,
-              })
-            }
-            return parsed
-          },
-          { maxRetries: this.effectiveMaxRetries, signal: this.signal },
+        const response = await this.translateChunkProgressive(
+          chunk,
+          messages,
+          sessionMemory,
+          tracker,
         )
 
         items = response.items
         repairCount = response.repaired ? 1 : 0
-        if (repairCount) totalRetries++
+        totalRetries += response.retryCount
       }
 
       // Validate: check all target cues got translations
@@ -596,6 +592,226 @@ export class PipelineOrchestrator {
     if (items.length === 0) return null
 
     return { items, repaired: parsed.repaired || response.finishReason === 'length' }
+  }
+
+  /**
+   * Progressive retry strategy for translation chunks.
+   *
+   * Tier 1: Standard request
+   * Tier 2: Same request with temperature 0.3 (introduce variation)
+   * Tier 3: Simplified prompt (strip corrections, halve context) with temperature 0.5
+   * Tier 4: Split chunk in half, translate each independently
+   * Final fallback: Use source text (never crash)
+   */
+  private async translateChunkProgressive(
+    chunk: TranslationChunk,
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    sessionMemory: SessionMemory | undefined,
+    tracker: ProgressTracker,
+  ): Promise<{ items: TranslatedItem[]; repaired: boolean; retryCount: number }> {
+    let retryCount = 0
+
+    // Tier 1: Standard request
+    {
+      this.checkCancelled()
+      const resp = await this.chatWithFallback(
+        {
+          model: this.config.translationModel,
+          messages,
+          jsonSchema: translationOutputSchema,
+          maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+          signal: this.signal,
+        },
+        tracker,
+      )
+      const parsed = this.parseTranslationResponse(resp, chunk)
+      if (parsed) return { ...parsed, retryCount }
+    }
+
+    // Parse failed — track it
+    this.trackParseFailure(tracker)
+    retryCount++
+
+    // Tier 2: Same request with temperature 0.3
+    {
+      this.checkCancelled()
+      try {
+        const resp = await this.chatWithFallback(
+          {
+            model: this.config.translationModel,
+            messages,
+            jsonSchema: translationOutputSchema,
+            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+            temperature: 0.3,
+            signal: this.signal,
+          },
+          tracker,
+        )
+        const parsed = this.parseTranslationResponse(resp, chunk)
+        if (parsed) return { ...parsed, retryCount }
+      } catch {
+        // Continue to next tier
+      }
+    }
+
+    this.trackParseFailure(tracker)
+    retryCount++
+
+    // Tier 3: Simplified prompt — strip corrections, halve context, temperature 0.5
+    if (this.effectiveMaxRetries >= 2) {
+      this.checkCancelled()
+      try {
+        const reducedMessages = this.buildReducedMessages(chunk, sessionMemory)
+        const resp = await this.chatWithFallback(
+          {
+            model: this.config.translationModel,
+            messages: reducedMessages,
+            jsonSchema: translationOutputSchema,
+            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+            temperature: 0.5,
+            signal: this.signal,
+          },
+          tracker,
+        )
+        const parsed = this.parseTranslationResponse(resp, chunk)
+        if (parsed) return { ...parsed, retryCount }
+      } catch {
+        // Continue to next tier
+      }
+
+      this.trackParseFailure(tracker)
+      retryCount++
+    }
+
+    // Tier 4: Split chunk in half and translate each half independently
+    if (chunk.targetCues.length > 1) {
+      this.checkCancelled()
+      try {
+        const items = await this.splitAndRetryChunk(chunk, sessionMemory, tracker)
+        return { items, repaired: true, retryCount }
+      } catch {
+        // Fall through to source text fallback
+      }
+    }
+
+    // Final fallback: use source text (never crash)
+    tracker.addWarnings(1)
+    const items = chunk.targetCues.map((cue) => ({
+      id: cue.sequence,
+      text: cue.rawText,
+    }))
+    return { items, repaired: false, retryCount }
+  }
+
+  /**
+   * Build a simplified prompt for retry tier 3:
+   * - Strip corrections
+   * - Halve context cues
+   */
+  private buildReducedMessages(
+    chunk: TranslationChunk,
+    sessionMemory: SessionMemory | undefined,
+  ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+    const halvedBefore = chunk.contextBefore.slice(
+      Math.floor(chunk.contextBefore.length / 2),
+    )
+    const halvedAfter = chunk.contextAfter.slice(
+      0,
+      Math.ceil(chunk.contextAfter.length / 2),
+    )
+
+    const { system, user } = buildTranslationPrompt({
+      targetCues: chunk.targetCues,
+      contextBefore: halvedBefore,
+      contextAfter: halvedAfter,
+      sessionMemory,
+      sourceLanguage: this.config.sourceLanguage,
+      targetLanguage: this.config.targetLanguage,
+      tonePreference: this.config.tonePreference,
+      // No corrections — stripped for simplicity
+    })
+
+    return this.strategy.formatMessages(system, user)
+  }
+
+  /**
+   * Split a chunk in half and translate each half with a single attempt.
+   * If a half fails to parse, use source text for those cues.
+   */
+  private async splitAndRetryChunk(
+    chunk: TranslationChunk,
+    sessionMemory: SessionMemory | undefined,
+    tracker: ProgressTracker,
+  ): Promise<TranslatedItem[]> {
+    const mid = Math.ceil(chunk.targetCues.length / 2)
+    const halves = [
+      chunk.targetCues.slice(0, mid),
+      chunk.targetCues.slice(mid),
+    ]
+
+    const allItems: TranslatedItem[] = []
+
+    for (const halfCues of halves) {
+      if (halfCues.length === 0) continue
+      this.checkCancelled()
+
+      const { system, user } = buildTranslationPrompt({
+        targetCues: halfCues,
+        contextBefore: chunk.contextBefore,
+        contextAfter: chunk.contextAfter,
+        sessionMemory,
+        sourceLanguage: this.config.sourceLanguage,
+        targetLanguage: this.config.targetLanguage,
+        tonePreference: this.config.tonePreference,
+      })
+
+      const messages = this.strategy.formatMessages(system, user)
+
+      try {
+        const resp = await this.chatWithFallback(
+          {
+            model: this.config.translationModel,
+            messages,
+            jsonSchema: translationOutputSchema,
+            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+            signal: this.signal,
+          },
+          tracker,
+        )
+        const parsed = this.parseTranslationResponse(resp, chunk)
+        if (parsed) {
+          allItems.push(...parsed.items)
+          continue
+        }
+      } catch {
+        // Fall through to source text
+      }
+
+      // Half failed — use source text for these cues
+      tracker.addWarnings(1)
+      for (const cue of halfCues) {
+        allItems.push({ id: cue.sequence, text: cue.rawText })
+      }
+    }
+
+    return allItems
+  }
+
+  /**
+   * Track a parse failure and auto-reduce chunk size after hitting threshold.
+   */
+  private trackParseFailure(tracker: ProgressTracker) {
+    this.parseFailureCount++
+    if (
+      this.parseFailureCount >= PipelineOrchestrator.PARSE_FAILURE_THRESHOLD &&
+      this.parseFailureCount % PipelineOrchestrator.PARSE_FAILURE_THRESHOLD === 0
+    ) {
+      const newSize = Math.max(4, Math.floor(this.effectiveChunkSize * PipelineOrchestrator.CHUNK_SIZE_REDUCTION))
+      if (newSize < this.effectiveChunkSize) {
+        this.effectiveChunkSize = newSize
+        tracker.addWarnings(1)
+      }
+    }
   }
 
   private isTranslateGemma(): boolean {

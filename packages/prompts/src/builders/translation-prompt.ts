@@ -138,3 +138,29 @@ export const translationOutputSchema = {
   },
   required: ['translations'],
 }
+
+/**
+ * Estimate the token overhead of the system prompt (excluding cue content).
+ * Used by the adaptive chunk calculator to reserve space for prompt framing.
+ */
+export function estimatePromptOverhead(config: {
+  speakerCount?: number
+  termCount?: number
+  correctionCount?: number
+  hasTonePreference?: boolean
+}): number {
+  const { speakerCount = 0, termCount = 0, correctionCount = 0, hasTonePreference = false } = config
+
+  // Base instructions (output rules, role description)
+  let tokens = 180
+  // Per speaker in memory section
+  tokens += speakerCount * 15
+  // Per term in terminology section
+  tokens += termCount * 12
+  // Per correction (capped at 10 in prompt)
+  tokens += Math.min(correctionCount, 10) * 20
+  // Tone preference line
+  if (hasTonePreference) tokens += 5
+
+  return tokens
+}

@@ -43,6 +43,7 @@ interface TranslationStore {
   tonePreference: string
   analysisModel: string
   reviewModel: string
+  translationMemoryEnabled: boolean
 
   setSourceLanguage: (lang: string) => void
   setTargetLanguage: (lang: string) => void
@@ -60,6 +61,7 @@ interface TranslationStore {
   setTonePreference: (tone: string) => void
   setAnalysisModel: (model: string) => void
   setReviewModel: (model: string) => void
+  setTranslationMemoryEnabled: (enabled: boolean) => void
 
   // Execution
   phase: PipelinePhase
@@ -115,6 +117,7 @@ export const useTranslationStore = create<TranslationStore>((set) => ({
   tonePreference: '',
   analysisModel: '',
   reviewModel: '',
+  translationMemoryEnabled: true,
 
   setSourceLanguage: (lang) => set({ sourceLanguage: lang }),
   setTargetLanguage: (lang) => set({ targetLanguage: lang }),
@@ -142,6 +145,7 @@ export const useTranslationStore = create<TranslationStore>((set) => ({
   setTonePreference: (tone) => set({ tonePreference: tone }),
   setAnalysisModel: (model) => set({ analysisModel: model }),
   setReviewModel: (model) => set({ reviewModel: model }),
+  setTranslationMemoryEnabled: (enabled) => set({ translationMemoryEnabled: enabled }),
 
   // Execution defaults
   phase: 'idle',

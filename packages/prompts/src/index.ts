@@ -5,7 +5,7 @@ export { GemmaStrategy } from './strategies/gemma-strategy.js'
 
 // Builders
 export { buildAnalysisPrompt } from './builders/analysis-prompt.js'
-export { buildTranslationPrompt, translationOutputSchema } from './builders/translation-prompt.js'
+export { buildTranslationPrompt, translationOutputSchema, estimatePromptOverhead } from './builders/translation-prompt.js'
 export { buildReviewPrompt, flagTranslations } from './builders/review-prompt.js'
 
 // Schemas

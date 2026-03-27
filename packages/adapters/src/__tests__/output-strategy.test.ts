@@ -29,6 +29,10 @@ describe('augmentPromptForJson', () => {
     const result = augmentPromptForJson('Hello', sampleSchema)
     expect(result).toContain('"type": "object"')
   })
+  it('does not wrap schema in markdown fences', () => {
+    const result = augmentPromptForJson('Hello', sampleSchema)
+    expect(result).not.toContain('```')
+  })
 })
 
 describe('prepareRequest', () => {
@@ -111,5 +115,22 @@ describe('isStructuredOutputError', () => {
   it('returns false for null/undefined', () => {
     expect(isStructuredOutputError(null)).toBe(false)
     expect(isStructuredOutputError(undefined)).toBe(false)
+  })
+
+  it('detects "unsupported parameter" errors', () => {
+    expect(isStructuredOutputError(new Error('unsupported parameter: format'))).toBe(true)
+  })
+
+  it('detects "unknown parameter format" errors', () => {
+    expect(isStructuredOutputError(new Error('unknown parameter "format" in request'))).toBe(true)
+  })
+
+  it('detects "does not support json" errors', () => {
+    const error = { error: { code: 'BAD_REQUEST', message: 'This model does not support JSON mode' } }
+    expect(isStructuredOutputError(error)).toBe(true)
+  })
+
+  it('detects "invalid response_format" errors', () => {
+    expect(isStructuredOutputError(new Error('invalid response_format value'))).toBe(true)
   })
 })

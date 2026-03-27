@@ -1,6 +1,7 @@
 import type { ModelInfo, ProviderConfig } from '@srtora/types'
 import { PipelineException } from '@srtora/types'
 import type { LLMAdapter, ChatRequest, ChatResponse } from './types.js'
+import { isStructuredOutputError } from './output-strategy.js'
 
 interface OpenAICompletionResponse {
   choices: Array<{
@@ -63,6 +64,10 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
         body.max_tokens = request.maxTokens
       }
 
+      if (request.temperature !== undefined) {
+        body.temperature = request.temperature
+      }
+
       // Only send response_format when using structured output strategy
       // For 'prompted' mode, JSON instructions are in the prompt text
       // For 'raw' mode, no JSON handling at all
@@ -87,6 +92,11 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
 
     if (!response.ok) {
       const text = await response.text().catch(() => 'Unknown error')
+
+      // Detect structured output rejection (e.g. 400: "JSON mode is not enabled for models/gemma-3-...")
+      const errorMessage = `API request failed (${response.status}): ${text}`
+      const looksLikeStructuredOutputError = response.status === 400 && isStructuredOutputError(new Error(text))
+
       const code =
         response.status === 401 || response.status === 403
           ? 'PROVIDER_AUTH_ERROR'
@@ -94,16 +104,20 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
             ? 'PROVIDER_RATE_LIMIT'
             : response.status === 404
               ? 'MODEL_NOT_FOUND'
-              : 'PROVIDER_UNREACHABLE'
+              : looksLikeStructuredOutputError
+                ? 'STRUCTURED_OUTPUT_FAIL'
+                : 'PROVIDER_UNREACHABLE'
 
       throw new PipelineException({
         code,
-        message: `API request failed (${response.status}): ${text}`,
+        message: errorMessage,
         details: text,
-        recoverable: response.status === 429 || response.status >= 500,
+        // 400s are recoverable (parameter rejections can be retried after prompt/strategy adjustment)
+        recoverable: response.status === 400 || response.status === 429 || response.status >= 500,
         suggestion:
           response.status === 401 ? 'Check your API key.' :
           response.status === 429 ? 'Rate limited. The request will be retried.' :
+          looksLikeStructuredOutputError ? 'The model does not support structured JSON output. Falling back to prompted mode.' :
           'Check that the API endpoint is correct and reachable.',
       })
     }

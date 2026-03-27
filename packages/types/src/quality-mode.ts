@@ -26,7 +26,7 @@ export const QualityModeConfigSchema = z.object({
   reviewPasses: z.number().int().min(0).max(3).default(1),
   chunkSizingStrategy: ChunkSizingStrategySchema.default('adaptive'),
   /** Only used if chunkSizingStrategy is 'fixed' */
-  fixedChunkSize: z.number().int().min(4).max(50).optional(),
+  fixedChunkSize: z.number().int().min(4).max(100).optional(),
   /** Context window usage target: 0.0-1.0. Higher = larger chunks. */
   contextUsageTarget: z.number().min(0.2).max(0.9).default(0.6),
   lookbehind: z.number().int().min(0).max(10),

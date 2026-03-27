@@ -12,6 +12,8 @@ export interface ChatRequest {
   jsonSchema?: Record<string, unknown>
   /** Maximum tokens for the completion. Prevents truncation on servers with low defaults. */
   maxTokens?: number
+  /** Sampling temperature (0-2). Higher = more random. Used for retry variation. */
+  temperature?: number
   /** Override the entire request body (for non-standard APIs like TranslateGemma) */
   rawBody?: Record<string, unknown>
   /** Output strategy: controls whether jsonSchema is sent as API param or as prompt text */

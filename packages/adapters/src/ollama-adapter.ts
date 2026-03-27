@@ -1,6 +1,7 @@
 import type { ModelInfo, ProviderConfig } from '@srtora/types'
 import { PipelineException } from '@srtora/types'
 import type { LLMAdapter, ChatRequest, ChatResponse } from './types.js'
+import { isStructuredOutputError } from './output-strategy.js'
 
 interface OllamaGenerateResponse {
   model: string
@@ -56,6 +57,10 @@ export class OllamaAdapter implements LLMAdapter {
       body.options = { num_predict: request.maxTokens }
     }
 
+    if (request.temperature !== undefined) {
+      body.options = { ...body.options as Record<string, unknown>, temperature: request.temperature }
+    }
+
     // Only send format when using structured output strategy
     // Ollama natively handles JSON format via the format field
     const effectiveStrategy = request.outputStrategy ?? (request.jsonSchema ? 'structured' : undefined)
@@ -71,15 +76,23 @@ export class OllamaAdapter implements LLMAdapter {
 
     if (!response.ok) {
       const text = await response.text().catch(() => 'Unknown error')
+      const looksLikeStructuredOutputError = response.status === 400 && isStructuredOutputError(new Error(text))
+
       throw new PipelineException({
-        code: response.status === 404 ? 'MODEL_NOT_FOUND' : 'PROVIDER_UNREACHABLE',
+        code: response.status === 404
+          ? 'MODEL_NOT_FOUND'
+          : looksLikeStructuredOutputError
+            ? 'STRUCTURED_OUTPUT_FAIL'
+            : 'PROVIDER_UNREACHABLE',
         message: `Ollama chat failed (${response.status}): ${text}`,
         details: text,
-        recoverable: response.status >= 500,
+        recoverable: response.status === 400 || response.status >= 500,
         suggestion:
           response.status === 404
             ? 'Make sure the model is pulled. Run: ollama pull <model>'
-            : 'Check that Ollama is running and accessible.',
+            : looksLikeStructuredOutputError
+              ? 'The model does not support structured JSON output. Falling back to prompted mode.'
+              : 'Check that Ollama is running and accessible.',
       })
     }
 

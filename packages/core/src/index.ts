@@ -19,6 +19,7 @@ export type { TranslationChunk } from './chunking/chunk-builder.js'
 export { mergeChunkResults } from './chunking/chunk-merger.js'
 export { calculateAdaptiveChunkSize, estimateAvgCueTokens } from './chunking/adaptive-chunk-calculator.js'
 export type { AdaptiveChunkParams } from './chunking/adaptive-chunk-calculator.js'
+export { getCharsPerToken, estimateTokens } from './chunking/token-estimator.js'
 
 // Validation
 export { validateDocument } from './validation/document-validator.js'
