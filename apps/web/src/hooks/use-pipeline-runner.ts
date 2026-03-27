@@ -40,11 +40,13 @@ export function usePipelineRunner() {
         enableAnalysis: state.enableAnalysis,
         enableReview: state.enableReview,
         bilingualOutput: state.bilingualOutput,
-        chunkSize: state.chunkSize,
         lookbehind: state.lookbehind,
         lookahead: state.lookahead,
         tonePreference: state.tonePreference || undefined,
-        maxRetries: 2,
+        // Quality mode drives chunk sizing, review passes, retries, etc.
+        qualityMode: state.preset,
+        // Only pass explicit chunkSize if in maximum mode (user control)
+        ...(state.preset === 'maximum' ? { chunkSize: state.chunkSize } : {}),
       }
 
       const abortController = new AbortController()

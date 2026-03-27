@@ -41,3 +41,40 @@ export { ReviewFlagSchema, ReviewCorrectionSchema, ReviewResultSchema } from './
 
 export type { ErrorCode, PipelineError } from './errors.js'
 export { ErrorCodeSchema, PipelineErrorSchema, PipelineException } from './errors.js'
+
+export type {
+  OutputStrategyType,
+  ModelCapabilities,
+  CapabilitySource,
+  ResolvedCapabilities,
+} from './capabilities.js'
+export {
+  OutputStrategyTypeSchema,
+  ModelCapabilitiesSchema,
+  CapabilitySourceSchema,
+  ResolvedCapabilitiesSchema,
+} from './capabilities.js'
+
+export type {
+  QualityModeId,
+  ChunkSizingStrategy,
+  QualityModeConfig,
+} from './quality-mode.js'
+export {
+  QualityModeIdSchema,
+  ChunkSizingStrategySchema,
+  QualityModeConfigSchema,
+} from './quality-mode.js'
+
+export type {
+  StoredTerm,
+  StoredSpeaker,
+  CorrectionEntry,
+  TranslationMemory,
+} from './memory.js'
+export {
+  StoredTermSchema,
+  StoredSpeakerSchema,
+  CorrectionEntrySchema,
+  TranslationMemorySchema,
+} from './memory.js'

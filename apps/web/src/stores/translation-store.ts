@@ -8,9 +8,9 @@ import type {
   TranslationResult,
   PipelineError,
   SubtitleFormat,
+  QualityModeId,
 } from '@srtora/types'
-import type { PresetId } from '@/lib/presets'
-import { PRESETS } from '@/lib/presets'
+import { PRESETS, type PresetId } from '@/lib/presets'
 
 interface FileState {
   filename: string
@@ -98,10 +98,10 @@ export const useTranslationStore = create<TranslationStore>((set) => ({
   setFile: (file) => set({ file }),
   clearFile: () => set({ file: null }),
 
-  // Config defaults
+  // Config defaults — use 'balanced' quality mode
   sourceLanguage: 'auto',
   targetLanguage: 'hr',
-  preset: 'balanced',
+  preset: 'balanced' as QualityModeId,
   provider: null,
   selectedModel: '',
   availableModels: [],
@@ -124,7 +124,6 @@ export const useTranslationStore = create<TranslationStore>((set) => ({
       preset: presetId,
       enableAnalysis: preset.enableAnalysis,
       enableReview: preset.enableReview,
-      chunkSize: preset.chunkSize,
       lookbehind: preset.lookbehind,
       lookahead: preset.lookahead,
     })

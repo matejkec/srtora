@@ -1,55 +1,27 @@
-export type PresetId = 'simple' | 'balanced' | 'quality' | 'advanced'
+import type { QualityModeId, QualityModeConfig } from '@srtora/types'
+import { QUALITY_MODES } from '@srtora/pipeline'
 
-export interface PresetConfig {
-  id: PresetId
-  label: string
-  description: string
-  enableAnalysis: boolean
-  enableReview: boolean
-  chunkSize: number
-  lookbehind: number
-  lookahead: number
-}
+// Re-export quality mode types for the UI layer
+export type PresetId = QualityModeId
 
-export const PRESETS: Record<PresetId, PresetConfig> = {
-  simple: {
-    id: 'simple',
-    label: 'Simple',
-    description: 'One model, fast translation',
-    enableAnalysis: false,
-    enableReview: false,
-    chunkSize: 20,
-    lookbehind: 2,
-    lookahead: 2,
-  },
-  balanced: {
-    id: 'balanced',
-    label: 'Balanced',
-    description: 'Analysis + translation with review',
-    enableAnalysis: true,
-    enableReview: true,
-    chunkSize: 15,
-    lookbehind: 3,
-    lookahead: 3,
-  },
-  quality: {
-    id: 'quality',
-    label: 'Quality',
-    description: 'Full pipeline with larger context',
-    enableAnalysis: true,
-    enableReview: true,
-    chunkSize: 12,
-    lookbehind: 5,
-    lookahead: 5,
-  },
-  advanced: {
-    id: 'advanced',
-    label: 'Advanced',
-    description: 'Full control over all settings',
-    enableAnalysis: true,
-    enableReview: true,
-    chunkSize: 15,
-    lookbehind: 3,
-    lookahead: 3,
-  },
+export type { QualityModeConfig as PresetConfig }
+
+/**
+ * Quality mode presets, re-exported from the pipeline package.
+ * Maps: fast, balanced, high-quality, maximum
+ */
+export const PRESETS: Record<PresetId, QualityModeConfig> = QUALITY_MODES
+
+/**
+ * Backward-compatible migration from legacy preset IDs to quality mode IDs.
+ * Old presets: simple → fast, balanced → balanced, quality → high-quality, advanced → maximum
+ */
+export function migratePresetId(legacyId: string): PresetId {
+  const migration: Record<string, PresetId> = {
+    simple: 'fast',
+    balanced: 'balanced',
+    quality: 'high-quality',
+    advanced: 'maximum',
+  }
+  return migration[legacyId] ?? (legacyId as PresetId)
 }

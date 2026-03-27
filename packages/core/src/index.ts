@@ -17,6 +17,8 @@ export { assembleBilingual } from './assembler/bilingual.js'
 export { buildChunks } from './chunking/chunk-builder.js'
 export type { TranslationChunk } from './chunking/chunk-builder.js'
 export { mergeChunkResults } from './chunking/chunk-merger.js'
+export { calculateAdaptiveChunkSize, estimateAvgCueTokens } from './chunking/adaptive-chunk-calculator.js'
+export type { AdaptiveChunkParams } from './chunking/adaptive-chunk-calculator.js'
 
 // Validation
 export { validateDocument } from './validation/document-validator.js'

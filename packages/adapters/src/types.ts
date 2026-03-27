@@ -1,4 +1,4 @@
-import type { ModelInfo } from '@srtora/types'
+import type { ModelInfo, OutputStrategyType } from '@srtora/types'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -14,6 +14,8 @@ export interface ChatRequest {
   maxTokens?: number
   /** Override the entire request body (for non-standard APIs like TranslateGemma) */
   rawBody?: Record<string, unknown>
+  /** Output strategy: controls whether jsonSchema is sent as API param or as prompt text */
+  outputStrategy?: OutputStrategyType
   signal?: AbortSignal
 }
 

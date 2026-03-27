@@ -56,8 +56,10 @@ export class OllamaAdapter implements LLMAdapter {
       body.options = { num_predict: request.maxTokens }
     }
 
-    // Use Ollama's native format field for structured JSON output
-    if (request.jsonSchema) {
+    // Only send format when using structured output strategy
+    // Ollama natively handles JSON format via the format field
+    const effectiveStrategy = request.outputStrategy ?? (request.jsonSchema ? 'structured' : undefined)
+    if (request.jsonSchema && effectiveStrategy === 'structured') {
       body.format = request.jsonSchema
     }
 

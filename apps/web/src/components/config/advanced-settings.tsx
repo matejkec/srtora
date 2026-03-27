@@ -30,7 +30,7 @@ export function AdvancedSettings() {
   } = useTranslationStore()
   const [isOpen, setIsOpen] = useState(false)
 
-  if (preset !== 'advanced' || connectionStatus !== 'connected') return null
+  if (preset !== 'maximum' || connectionStatus !== 'connected') return null
 
   return (
     <div className="rounded-lg border border-border">

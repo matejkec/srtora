@@ -6,6 +6,9 @@ import type {
   TranslationResult,
   TranslatedItem,
   ReviewResult,
+  OutputStrategyType,
+  ModelCapabilities,
+  CorrectionEntry,
 } from '@srtora/types'
 import {
   PipelineException,
@@ -18,10 +21,20 @@ import {
   assemble,
   assembleBilingual,
   validateOutput,
+  calculateAdaptiveChunkSize,
+  estimateAvgCueTokens,
 } from '@srtora/core'
 import type { TranslationChunk } from '@srtora/core'
-import type { LLMAdapter, ChatResponse } from '@srtora/adapters'
-import { createAdapter, withRetry, parseJsonSafe, buildTranslateGemmaPrompt } from '@srtora/adapters'
+import type { LLMAdapter, ChatRequest, ChatResponse } from '@srtora/adapters'
+import {
+  createAdapter,
+  withRetry,
+  parseJsonSafe,
+  buildTranslateGemmaPrompt,
+  resolveCapabilities,
+  prepareRequest,
+  isStructuredOutputError,
+} from '@srtora/adapters'
 import {
   buildAnalysisPrompt,
   buildTranslationPrompt,
@@ -35,13 +48,12 @@ import {
 } from '@srtora/prompts'
 import type { PromptStrategy } from '@srtora/prompts'
 import { ProgressTracker } from './progress-tracker.js'
+import { QUALITY_MODES } from './quality-modes.js'
+import { mergeMemoryIntoSession, getRelevantCorrections } from './memory-injector.js'
 
 /**
  * Returns true if the model name refers to a TranslateGemma model.
  * Covers all realistic naming variants by stripping separators before matching.
- *
- * Examples matched: translate-gemma-2b, TranslateGemma-2.9B-4bit,
- *   mlx-community/TranslateGemma-2.9b-4bit-mlx, translate_gemma, gemma-translate
  */
 export function isTranslateGemmaModel(modelName: string): boolean {
   const normalized = modelName.toLowerCase().replace(/[-_/]/g, '')
@@ -55,10 +67,25 @@ export interface PipelineCallbacks {
 export class PipelineOrchestrator {
   private config: PipelineConfig
   private adapter: LLMAdapter
-  private analysisAdapter: LLMAdapter
-  private reviewAdapter: LLMAdapter
   private strategy: PromptStrategy
   private signal?: AbortSignal
+
+  /** Effective output strategy (resolved from capabilities or config override) */
+  private outputStrategy: OutputStrategyType = 'prompted'
+  /** Resolved model capabilities */
+  private modelCaps: ModelCapabilities | null = null
+  /** Effective chunk size (may be computed adaptively) */
+  private effectiveChunkSize: number
+  /** Number of review passes */
+  private reviewPasses: number
+  /** Effective lookbehind */
+  private effectiveLookbehind: number
+  /** Effective lookahead */
+  private effectiveLookahead: number
+  /** Effective max retries */
+  private effectiveMaxRetries: number
+  /** Quality mode context usage target */
+  private contextUsageTarget: number
 
   /** Reasonable max tokens to prevent truncation on servers with low defaults (e.g. MLX 256) */
   private static readonly MAX_COMPLETION_TOKENS = 4096
@@ -70,9 +97,25 @@ export class PipelineOrchestrator {
     this.config = config
     this.signal = options?.signal
 
+    // Resolve quality mode
+    const mode = config.qualityMode ? QUALITY_MODES[config.qualityMode] : undefined
+
+    // Apply quality mode defaults, with explicit config overrides
+    const enableAnalysis = config.enableAnalysis ?? mode?.enableAnalysis ?? true
+    const enableReview = config.enableReview ?? mode?.enableReview ?? true
+    this.reviewPasses = config.reviewPasses ?? mode?.reviewPasses ?? 1
+    this.effectiveChunkSize = config.chunkSize ?? mode?.fixedChunkSize ?? 15
+    this.effectiveLookbehind = config.lookbehind ?? mode?.lookbehind ?? 3
+    this.effectiveLookahead = config.lookahead ?? mode?.lookahead ?? 3
+    this.effectiveMaxRetries = config.maxRetries ?? mode?.maxRetries ?? 2
+    this.contextUsageTarget = mode?.contextUsageTarget ?? 0.6
+
     // TranslateGemma is a specialized model — disable analysis/review
     if (this.isTranslateGemma()) {
       this.config = { ...this.config, enableAnalysis: false, enableReview: false }
+      this.reviewPasses = 0
+    } else {
+      this.config = { ...this.config, enableAnalysis, enableReview }
     }
 
     // Auto-detect prompt strategy based on model family
@@ -85,10 +128,21 @@ export class PipelineOrchestrator {
         : new DefaultStrategy()
     }
 
-    // Create adapters — analysis/review may use different models but same provider
+    // Create adapter
     this.adapter = createAdapter(config.provider)
-    this.analysisAdapter = this.adapter
-    this.reviewAdapter = this.adapter
+
+    // Resolve model capabilities and output strategy
+    const resolved = resolveCapabilities(
+      config.translationModel,
+      config.provider.type,
+    )
+    this.modelCaps = resolved.capabilities
+    this.outputStrategy = config.outputStrategy ?? resolved.outputStrategy
+
+    // Override prompt strategy based on capabilities
+    if (this.modelCaps && !this.modelCaps.supportsSystemRole && !options?.strategy) {
+      this.strategy = new GemmaStrategy()
+    }
   }
 
   async run(
@@ -133,8 +187,36 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
+    // === Adaptive chunk sizing ===
+    const qualityMode = this.config.qualityMode ? QUALITY_MODES[this.config.qualityMode] : undefined
+    if (qualityMode?.chunkSizingStrategy === 'adaptive' || (!this.config.chunkSize && this.modelCaps)) {
+      const avgCueTokens = estimateAvgCueTokens(document)
+      this.effectiveChunkSize = calculateAdaptiveChunkSize({
+        contextWindow: this.modelCaps?.contextWindow ?? null,
+        avgCueTokens,
+        lookbehind: this.effectiveLookbehind,
+        lookahead: this.effectiveLookahead,
+        contextUsageTarget: this.contextUsageTarget,
+        outputStrategy: this.outputStrategy,
+      })
+    }
+
+    // === Merge translation memory ===
+    const languagePair = `${this.config.sourceLanguage}->${this.config.targetLanguage}`
+    let corrections: CorrectionEntry[] = []
+    let initialSessionMemory: SessionMemory | undefined
+
+    if (this.config.translationMemory) {
+      initialSessionMemory = mergeMemoryIntoSession(
+        this.config.translationMemory,
+        undefined,
+        languagePair,
+      )
+      corrections = getRelevantCorrections(this.config.translationMemory, languagePair)
+    }
+
     // === Phase 1: Analyze (optional) ===
-    let sessionMemory: SessionMemory | undefined
+    let sessionMemory: SessionMemory | undefined = initialSessionMemory
 
     if (this.config.enableAnalysis) {
       tracker.emit('analyzing', { message: 'Analyzing content...' })
@@ -155,23 +237,31 @@ export class PipelineOrchestrator {
       const model = this.config.analysisModel || this.config.translationModel
 
       try {
-        const response = await withRetry(
-          () =>
-            this.analysisAdapter.chat({
-              model,
-              messages,
-              jsonSchema: analysisOutputSchema,
-              maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-              signal: this.signal,
-            }),
-          { maxRetries: this.config.maxRetries, signal: this.signal },
+        const response = await this.chatWithFallback(
+          {
+            model,
+            messages,
+            jsonSchema: analysisOutputSchema,
+            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+            signal: this.signal,
+          },
+          tracker,
         )
 
         const parsed = parseJsonSafe(response.content)
         if (parsed) {
           const validated = SessionMemorySchema.safeParse(parsed.data)
           if (validated.success) {
-            sessionMemory = validated.data
+            // Merge analysis results with translation memory
+            if (this.config.translationMemory && initialSessionMemory) {
+              sessionMemory = mergeMemoryIntoSession(
+                this.config.translationMemory,
+                validated.data,
+                languagePair,
+              )
+            } else {
+              sessionMemory = validated.data
+            }
           } else {
             tracker.addWarnings(1)
           }
@@ -200,9 +290,9 @@ export class PipelineOrchestrator {
     const translateStart = Date.now()
 
     const chunks = buildChunks(document, {
-      chunkSize: this.config.chunkSize,
-      lookbehind: this.config.lookbehind,
-      lookahead: this.config.lookahead,
+      chunkSize: this.effectiveChunkSize,
+      lookbehind: this.effectiveLookbehind,
+      lookahead: this.effectiveLookahead,
     })
 
     const chunkResults: { chunkId: string; items: TranslatedItem[]; warnings: string[]; repairCount: number }[] = []
@@ -231,7 +321,7 @@ export class PipelineOrchestrator {
         // TranslateGemma: per-cue translation with specialized content format
         items = await this.translateChunkWithTranslateGemma(chunk)
       } else {
-        // Standard path: batch translation with JSON schema
+        // Standard path: batch translation with output strategy
         const { system, user } = buildTranslationPrompt({
           targetCues: chunk.targetCues,
           contextBefore: chunk.contextBefore,
@@ -241,19 +331,23 @@ export class PipelineOrchestrator {
           sourceLanguage: this.config.sourceLanguage,
           targetLanguage: this.config.targetLanguage,
           tonePreference: this.config.tonePreference,
+          corrections: corrections.length > 0 ? corrections : undefined,
         })
 
         const messages = this.strategy.formatMessages(system, user)
 
         const response = await withRetry(
           async () => {
-            const resp = await this.adapter.chat({
-              model: this.config.translationModel,
-              messages,
-              jsonSchema: translationOutputSchema,
-              maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-              signal: this.signal,
-            })
+            const resp = await this.chatWithFallback(
+              {
+                model: this.config.translationModel,
+                messages,
+                jsonSchema: translationOutputSchema,
+                maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+                signal: this.signal,
+              },
+              tracker,
+            )
 
             const parsed = this.parseTranslationResponse(resp, chunk)
             if (!parsed) {
@@ -267,7 +361,7 @@ export class PipelineOrchestrator {
             }
             return parsed
           },
-          { maxRetries: this.config.maxRetries, signal: this.signal },
+          { maxRetries: this.effectiveMaxRetries, signal: this.signal },
         )
 
         items = response.items
@@ -307,21 +401,33 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
-    // === Phase 3: Review (optional) ===
-    if (this.config.enableReview) {
+    // === Phase 3: Review (optional, multi-pass) ===
+    if (this.config.enableReview && this.reviewPasses > 0) {
       tracker.emit('reviewing', { message: 'Reviewing translations...' })
       const reviewStart = Date.now()
 
-      const flags = flagTranslations({
-        cues: document.cues,
-        translations: allTranslations,
-        sessionMemory,
-      })
+      for (let pass = 0; pass < this.reviewPasses; pass++) {
+        this.checkCancelled()
 
-      if (flags.length > 0) {
+        const flags = flagTranslations({
+          cues: document.cues,
+          translations: allTranslations,
+          sessionMemory,
+        })
+
+        if (flags.length === 0) {
+          tracker.emit('reviewing', {
+            phaseProgress: 0.9,
+            message: pass === 0
+              ? 'No issues found during review'
+              : `Review pass ${pass + 1}: no further issues found`,
+          })
+          break
+        }
+
         tracker.emit('reviewing', {
-          phaseProgress: 0.3,
-          message: `Found ${flags.length} issues, requesting corrections...`,
+          phaseProgress: (pass + 0.3) / this.reviewPasses,
+          message: `Review pass ${pass + 1}/${this.reviewPasses}: found ${flags.length} issues...`,
         })
 
         const { system, user } = buildReviewPrompt({
@@ -338,37 +444,38 @@ export class PipelineOrchestrator {
 
         try {
           const response = await withRetry(
-            () =>
-              this.reviewAdapter.chat({
+            () => this.chatWithFallback(
+              {
                 model,
                 messages,
                 jsonSchema: reviewOutputSchema,
                 maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
                 signal: this.signal,
-              }),
-            { maxRetries: this.config.maxRetries, signal: this.signal },
+              },
+              tracker,
+            ),
+            { maxRetries: this.effectiveMaxRetries, signal: this.signal },
           )
 
           const parsed = parseJsonSafe<ReviewResult>(response.content)
-          if (parsed?.data?.corrections) {
+          if (parsed?.data?.corrections && parsed.data.corrections.length > 0) {
             for (const correction of parsed.data.corrections) {
               allTranslations.set(correction.id, correction.text)
             }
             tracker.emit('reviewing', {
-              phaseProgress: 0.9,
-              message: `Applied ${parsed.data.corrections.length} corrections`,
+              phaseProgress: (pass + 0.9) / this.reviewPasses,
+              message: `Pass ${pass + 1}: applied ${parsed.data.corrections.length} corrections`,
             })
+          } else {
+            // No corrections returned — stop early
+            break
           }
         } catch (error) {
           // Review is optional — log warning and continue
           if (error instanceof PipelineException && error.error.code === 'CANCELLED') throw error
           tracker.addWarnings(1)
+          break
         }
-      } else {
-        tracker.emit('reviewing', {
-          phaseProgress: 0.9,
-          message: 'No issues found during review',
-        })
       }
 
       phaseDurations.reviewing = Date.now() - reviewStart
@@ -412,6 +519,7 @@ export class PipelineOrchestrator {
       ...validation.issues,
     ]
 
+    // Extract memory updates if translation memory is active
     const result: TranslationResult = {
       document,
       sessionMemory,
@@ -430,6 +538,33 @@ export class PipelineOrchestrator {
     tracker.emit('complete', { phaseProgress: 1, message: 'Translation complete!' })
 
     return result
+  }
+
+  /**
+   * Send a chat request with automatic fallback from structured to prompted mode.
+   *
+   * If the model returns a 400 error indicating JSON mode isn't supported,
+   * automatically retry with prompted mode (JSON instructions in the prompt text).
+   */
+  private async chatWithFallback(
+    request: ChatRequest,
+    tracker: ProgressTracker,
+  ): Promise<ChatResponse> {
+    const prepared = prepareRequest(request, this.outputStrategy)
+
+    try {
+      return await this.adapter.chat(prepared)
+    } catch (error) {
+      // If structured output fails, downgrade to prompted mode and retry
+      if (this.outputStrategy === 'structured' && isStructuredOutputError(error)) {
+        this.outputStrategy = 'prompted'
+        tracker.addWarnings(1)
+
+        const fallback = prepareRequest(request, 'prompted')
+        return await this.adapter.chat(fallback)
+      }
+      throw error
+    }
   }
 
   private parseTranslationResponse(
@@ -458,7 +593,6 @@ export class PipelineOrchestrator {
     )
 
     // If the response was truncated but we recovered some items, use them
-    // rather than retrying and getting the same truncation
     if (items.length === 0) return null
 
     return { items, repaired: parsed.repaired || response.finishReason === 'length' }
@@ -470,11 +604,6 @@ export class PipelineOrchestrator {
 
   /**
    * Translate a chunk using TranslateGemma's pre-formatted prompt + /v1/completions.
-   *
-   * The MLX-LM server strips content arrays to plain strings before the Jinja
-   * template runs, so /v1/chat/completions cannot work with TranslateGemma.
-   * Instead we replicate the Jinja template in TypeScript and call /v1/completions.
-   * Sends one request per cue since TranslateGemma accepts exactly one text item.
    */
   private async translateChunkWithTranslateGemma(
     chunk: TranslationChunk,
@@ -499,10 +628,10 @@ export class PipelineOrchestrator {
             ['<end_of_turn>'],
             this.signal,
           ),
-        { maxRetries: this.config.maxRetries, signal: this.signal },
+        { maxRetries: this.effectiveMaxRetries, signal: this.signal },
       )
 
-      // Strip any special tokens that leaked through (e.g. <end_of_turn> repeated on bad stop)
+      // Strip any special tokens that leaked through
       const translated = translatedText
         .replace(/<end_of_turn>[\s\S]*/g, '')
         .replace(/<start_of_turn>[\s\S]*/g, '')

@@ -2,13 +2,13 @@
 
 import { useTranslationStore } from '@/stores/translation-store'
 import { PRESETS, type PresetId } from '@/lib/presets'
-import { Zap, Scale, Sparkles, Settings } from 'lucide-react'
+import { Zap, Scale, Sparkles, Crown } from 'lucide-react'
 
 const PRESET_ICONS: Record<PresetId, React.ReactNode> = {
-  simple: <Zap className="h-4 w-4" />,
+  fast: <Zap className="h-4 w-4" />,
   balanced: <Scale className="h-4 w-4" />,
-  quality: <Sparkles className="h-4 w-4" />,
-  advanced: <Settings className="h-4 w-4" />,
+  'high-quality': <Sparkles className="h-4 w-4" />,
+  maximum: <Crown className="h-4 w-4" />,
 }
 
 export function PresetSelector() {
@@ -18,7 +18,7 @@ export function PresetSelector() {
 
   return (
     <div>
-      <label className="text-xs font-medium text-muted-foreground mb-2 block">Preset</label>
+      <label className="text-xs font-medium text-muted-foreground mb-2 block">Quality Mode</label>
       <div className="grid grid-cols-4 gap-2">
         {(Object.entries(PRESETS) as [PresetId, (typeof PRESETS)[PresetId]][]).map(
           ([id, config]) => (
@@ -33,6 +33,7 @@ export function PresetSelector() {
                     : 'border-border hover:border-muted-foreground'
                 }
               `}
+              title={config.description}
             >
               {PRESET_ICONS[id]}
               <span className="text-xs font-medium">{config.label}</span>

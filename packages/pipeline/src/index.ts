@@ -1,3 +1,5 @@
 export { PipelineOrchestrator, isTranslateGemmaModel } from './orchestrator.js'
 export type { PipelineCallbacks } from './orchestrator.js'
 export { ProgressTracker } from './progress-tracker.js'
+export { QUALITY_MODES, getQualityMode, listQualityModes } from './quality-modes.js'
+export { mergeMemoryIntoSession, extractMemoryUpdates } from './memory-injector.js'

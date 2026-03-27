@@ -1,4 +1,4 @@
-import type { SubtitleCue, SessionMemory } from '@srtora/types'
+import type { SubtitleCue, SessionMemory, CorrectionEntry } from '@srtora/types'
 
 /**
  * Builds the translation prompt for a chunk of subtitle cues.
@@ -13,6 +13,8 @@ export function buildTranslationPrompt(config: {
   sourceLanguage: string
   targetLanguage: string
   tonePreference?: string
+  /** Known corrections from translation memory (optional) */
+  corrections?: CorrectionEntry[]
 }): { system: string; user: string } {
   const {
     targetCues,
@@ -23,6 +25,7 @@ export function buildTranslationPrompt(config: {
     sourceLanguage,
     targetLanguage,
     tonePreference,
+    corrections,
   } = config
 
   // Build memory context section
@@ -58,6 +61,16 @@ export function buildTranslationPrompt(config: {
     }
   }
 
+  // Build corrections section from translation memory
+  let correctionsSection = ''
+  if (corrections && corrections.length > 0) {
+    const correctionList = corrections
+      .slice(0, 10) // limit to avoid prompt bloat
+      .map((c) => `  - "${c.originalTranslation}" → "${c.correctedTranslation}"${c.reason ? ` (${c.reason})` : ''}`)
+      .join('\n')
+    correctionsSection = `\n\nKnown corrections from previous translations:\n${correctionList}`
+  }
+
   const toneNote = tonePreference ? `\nTone preference: ${tonePreference}` : ''
 
   const system = `You are a professional subtitle translator. Translate the TRANSLATE cues from ${sourceLanguage} to ${targetLanguage}.
@@ -70,7 +83,7 @@ Output rules:
 - Keep translations natural and appropriate for subtitles (concise, readable)
 - Maintain consistency with the provided terminology and session context
 - Do not add or remove cues — translate each one exactly once
-- Return ONLY the JSON object, no other text${toneNote}${memorySection}`
+- Return ONLY the JSON object, no other text${toneNote}${memorySection}${correctionsSection}`
 
   // Build user prompt with context and target cues
   const lines: string[] = []

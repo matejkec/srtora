@@ -1,5 +1,8 @@
 import { z } from 'zod'
 import { ProviderConfigSchema } from './provider.js'
+import { QualityModeIdSchema } from './quality-mode.js'
+import { OutputStrategyTypeSchema, ResolvedCapabilitiesSchema } from './capabilities.js'
+import { TranslationMemorySchema } from './memory.js'
 
 export const PipelinePhaseSchema = z.enum([
   'idle',
@@ -40,13 +43,23 @@ export const PipelineConfigSchema = z.object({
   translationModel: z.string(),
   analysisModel: z.string().optional(),
   reviewModel: z.string().optional(),
-  enableAnalysis: z.boolean().default(true),
-  enableReview: z.boolean().default(true),
-  bilingualOutput: z.boolean().default(false),
-  chunkSize: z.number().int().min(4).max(50).default(15),
-  lookbehind: z.number().int().min(0).max(10).default(3),
-  lookahead: z.number().int().min(0).max(10).default(3),
+  enableAnalysis: z.boolean().optional(),
+  enableReview: z.boolean().optional(),
+  bilingualOutput: z.boolean().optional(),
+  chunkSize: z.number().int().min(4).max(50).optional(),
+  lookbehind: z.number().int().min(0).max(10).optional(),
+  lookahead: z.number().int().min(0).max(10).optional(),
   tonePreference: z.string().optional(),
-  maxRetries: z.number().int().min(0).max(5).default(2),
+  maxRetries: z.number().int().min(0).max(5).optional(),
+  /** Quality mode — when set, overrides analysis/review/chunking defaults */
+  qualityMode: QualityModeIdSchema.optional(),
+  /** Override output strategy. Null = auto-detect from model capabilities. */
+  outputStrategy: OutputStrategyTypeSchema.optional(),
+  /** Translation memory to inject into prompts */
+  translationMemory: TranslationMemorySchema.optional(),
+  /** Resolved model capabilities (injected by orchestrator setup) */
+  modelCapabilities: ResolvedCapabilitiesSchema.optional(),
+  /** Number of review passes (overrides quality mode default) */
+  reviewPasses: z.number().int().min(0).max(3).optional(),
 })
 export type PipelineConfig = z.infer<typeof PipelineConfigSchema>

@@ -63,8 +63,11 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
         body.max_tokens = request.maxTokens
       }
 
-      // OpenAI-compatible structured output via response_format
-      if (request.jsonSchema) {
+      // Only send response_format when using structured output strategy
+      // For 'prompted' mode, JSON instructions are in the prompt text
+      // For 'raw' mode, no JSON handling at all
+      const effectiveStrategy = request.outputStrategy ?? (request.jsonSchema ? 'structured' : undefined)
+      if (request.jsonSchema && effectiveStrategy === 'structured') {
         body.response_format = {
           type: 'json_schema',
           json_schema: {
