@@ -1,0 +1,16 @@
+WEBVTT
+
+00:01.000 --> 00:04.000
+<i>This is italic text.</i>
+
+00:05.000 --> 00:08.000
+<b>Bold text</b> and normal text.
+
+00:09.000 --> 00:12.000
+<u>Underlined</u> and <i>italic</i>.
+
+00:13.000 --> 00:16.000
+Red text here.
+
+00:17.000 --> 00:20.000
+<b><i>Bold and italic.</i></b>

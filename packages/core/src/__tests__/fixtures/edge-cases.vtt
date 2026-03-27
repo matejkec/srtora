@@ -1,0 +1,32 @@
+WEBVTT
+
+STYLE
+::cue {
+  color: white;
+  background-color: black;
+}
+
+REGION
+id:narrator
+width:50%
+lines:2
+regionanchor:50%,100%
+viewportanchor:50%,90%
+
+NOTE This is a header note.
+
+intro-1
+00:01.000 --> 00:04.000
+<i>This is italic text.</i>
+
+intro-2
+00:05.000 --> 00:08.000 position:50% align:center
+<b>Bold text</b> and normal text.
+
+NOTE Mid-file note between cues.
+
+00:09.000 --> 00:12.000
+<v Speaker1>Hello there.</v>
+
+00:13.000 --> 00:16.000 region:narrator
+<c.highlight>Highlighted text.</c>
