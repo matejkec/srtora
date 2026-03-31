@@ -1,7 +1,8 @@
 // Strategies
 export type { ChatMessage, PromptStrategy } from './strategies/types.js'
 export { DefaultStrategy } from './strategies/default-strategy.js'
-export { GemmaStrategy } from './strategies/gemma-strategy.js'
+export { GemmaStrategy, NoSystemRoleStrategy } from './strategies/gemma-strategy.js'
+export { createPromptStrategy } from './strategies/strategy-factory.js'
 
 // Builders
 export { buildAnalysisPrompt } from './builders/analysis-prompt.js'

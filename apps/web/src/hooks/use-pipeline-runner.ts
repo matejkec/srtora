@@ -24,7 +24,7 @@ export function usePipelineRunner() {
 
     const runPipeline = async () => {
       const state = useTranslationStore.getState()
-      const { file, provider, selectedModel, apiKey } = state
+      const { file, provider, selectedModel, apiKey, annotatedModels } = state
 
       if (!file || !provider || !selectedModel) return
 
@@ -44,6 +44,11 @@ export function usePipelineRunner() {
         }
       }
 
+      // Resolve Ollama family from annotated models for better registry matching
+      const ollamaFamily = annotatedModels.find(
+        (m) => m.modelInfo.id === selectedModel,
+      )?.modelInfo.family
+
       const config: PipelineConfig = {
         sourceLanguage: state.sourceLanguage,
         targetLanguage: state.targetLanguage,
@@ -56,13 +61,11 @@ export function usePipelineRunner() {
         bilingualOutput: state.bilingualOutput,
         lookbehind: state.lookbehind,
         lookahead: state.lookahead,
+        maxRetries: 2,
         tonePreference: state.tonePreference || undefined,
-        // Quality mode drives chunk sizing, review passes, retries, etc.
         qualityMode: state.preset,
-        // Only pass explicit chunkSize if in maximum mode (user control)
-        ...(state.preset === 'maximum' ? { chunkSize: state.chunkSize } : {}),
-        // Translation memory
         ...(translationMemory ? { translationMemory } : {}),
+        ...(ollamaFamily ? { ollamaFamily } : {}),
       }
 
       const abortController = new AbortController()

@@ -6,7 +6,6 @@ import { PresetSelector } from './preset-selector'
 import { ProviderSelector } from './provider-selector'
 import { ModelSelector } from './model-selector'
 import { AdvancedSettings } from './advanced-settings'
-import { MemoryPanel } from './memory-panel'
 import { TranslateButton } from './translate-button'
 
 export function ConfigPanel() {
@@ -34,9 +33,6 @@ export function ConfigPanel() {
 
       {/* Model Selection */}
       <ModelSelector />
-
-      {/* Translation Memory */}
-      <MemoryPanel />
 
       {/* Advanced Settings */}
       <AdvancedSettings />

@@ -14,8 +14,20 @@ export {
   ModelInfoSchema,
 } from './provider.js'
 
-export type { PipelinePhase, ProgressEvent, PipelineConfig } from './pipeline.js'
-export { PipelinePhaseSchema, ProgressEventSchema, PipelineConfigSchema } from './pipeline.js'
+export type {
+  PipelinePhase,
+  ProgressEvent,
+  PipelineConfig,
+  QualityModeId,
+  QualityModeConfig,
+} from './pipeline.js'
+export {
+  PipelinePhaseSchema,
+  ProgressEventSchema,
+  PipelineConfigSchema,
+  QualityModeIdSchema,
+  QualityModeConfigSchema,
+} from './pipeline.js'
 
 export type { Gender, SpeakerMemory, TermEntry, SessionMemory } from './analysis.js'
 export {
@@ -56,15 +68,25 @@ export {
 } from './capabilities.js'
 
 export type {
-  QualityModeId,
-  ChunkSizingStrategy,
-  QualityModeConfig,
-} from './quality-mode.js'
+  ModelSupportTier,
+  ModelCategory,
+  PromptStyleId,
+  StructuredOutputMethod,
+  ExecutionProfile,
+  ModelRegistryEntry,
+  MatchType,
+  ModelMatchResult,
+} from './model-registry.js'
 export {
-  QualityModeIdSchema,
-  ChunkSizingStrategySchema,
-  QualityModeConfigSchema,
-} from './quality-mode.js'
+  ModelSupportTierSchema,
+  ModelCategorySchema,
+  PromptStyleIdSchema,
+  StructuredOutputMethodSchema,
+  ExecutionProfileSchema,
+  ModelRegistryEntrySchema,
+  MatchTypeSchema,
+  ModelMatchResultSchema,
+} from './model-registry.js'
 
 export type {
   StoredTerm,

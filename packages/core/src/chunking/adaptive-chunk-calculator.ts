@@ -10,19 +10,20 @@ const FALLBACK_CONTEXT_TOKENS = 4096
 const STRUCTURED_SCHEMA_OVERHEAD = 200
 /** Estimated tokens for session memory section */
 const MEMORY_OVERHEAD = 100
-/** Fraction of target budget reserved for output tokens.
+/** Default fraction of target budget reserved for output tokens.
  *  Translation is roughly 1:1 in tokens, so reserve half. */
-const OUTPUT_RESERVE_RATIO = 0.5
+const DEFAULT_OUTPUT_RESERVE_RATIO = 0.5
 
 /**
  * Compute dynamic max chunk size based on total cue count.
- * Larger files can use larger chunks without losing quality.
+ * Raised ceilings: 100/200/300 (was 50/75/100) — acts as safety guardrail only,
+ * not the primary sizing constraint. Token budget is the real limiter.
  */
 function dynamicMaxChunkSize(totalCues?: number): number {
-  if (!totalCues) return 50
-  if (totalCues >= 500) return 100
-  if (totalCues >= 100) return 75
-  return 50
+  if (!totalCues) return 100
+  if (totalCues >= 500) return 300
+  if (totalCues >= 100) return 200
+  return 100
 }
 
 export interface AdaptiveChunkParams {
@@ -44,17 +45,24 @@ export interface AdaptiveChunkParams {
   maxOutputTokens?: number | null
   /** Total cue count in the document (used for dynamic max chunk size) */
   totalCues?: number
+  /** Pre-calculated safe input budget. If set, replaces contextWindow × contextUsageTarget. */
+  safeInputBudget?: number | null
+  /** Hard ceiling on chunk size (cue count). If set, additional clamp applied on top of dynamic max. */
+  hardChunkCeiling?: number | null
+  /** Fraction of maxOutputTokens to actually use (0-1). Scales the output reserve.
+   *  Models that degrade at high output length should use lower values. Default: 0.85 */
+  outputStabilityThreshold?: number
 }
 
 /**
  * Calculate an adaptive chunk size based on model context window and cue characteristics.
  *
  * Algorithm:
- * 1. Determine available token budget from context window × usage target
+ * 1. Determine available token budget from context window × usage target (or safeInputBudget override)
  * 2. Subtract overheads (system prompt, schema, memory, context cues)
  * 3. Remaining budget → compute how many target cues fit
- * 4. Apply maxOutputTokens constraint if available
- * 5. Clamp to [MIN_CHUNK_SIZE, dynamic max]
+ * 4. Apply maxOutputTokens constraint if available (scaled by outputStabilityThreshold)
+ * 5. Clamp to [MIN_CHUNK_SIZE, min(dynamic max, hardChunkCeiling)]
  */
 export function calculateAdaptiveChunkSize(params: AdaptiveChunkParams): number {
   const {
@@ -67,16 +75,25 @@ export function calculateAdaptiveChunkSize(params: AdaptiveChunkParams): number 
     systemPromptOverhead = 400,
     maxOutputTokens,
     totalCues,
+    safeInputBudget,
+    hardChunkCeiling,
+    outputStabilityThreshold = 0.85,
   } = params
 
-  const maxChunkSize = dynamicMaxChunkSize(totalCues)
+  let maxChunkSize = dynamicMaxChunkSize(totalCues)
+
+  // Apply hard chunk ceiling if set
+  if (hardChunkCeiling != null && hardChunkCeiling > 0) {
+    maxChunkSize = Math.min(maxChunkSize, hardChunkCeiling)
+  }
 
   // Ensure avgCueTokens is at least 1 to avoid division by zero
   const safeAvgCueTokens = Math.max(1, avgCueTokens)
 
-  // 1. Total available tokens
-  const effectiveContext = contextWindow ?? FALLBACK_CONTEXT_TOKENS
-  const availableTokens = effectiveContext * contextUsageTarget
+  // 1. Total available tokens — use safeInputBudget if provided, else derive
+  const availableTokens = (safeInputBudget != null && safeInputBudget > 0)
+    ? safeInputBudget
+    : (contextWindow ?? FALLBACK_CONTEXT_TOKENS) * contextUsageTarget
 
   // 2. Calculate overhead
   const schemaOverhead = outputStrategy === 'structured' ? STRUCTURED_SCHEMA_OVERHEAD : 0
@@ -85,15 +102,16 @@ export function calculateAdaptiveChunkSize(params: AdaptiveChunkParams): number 
 
   // 3. Remaining budget for target cues (input + output)
   const targetBudget = Math.max(0, availableTokens - totalOverhead)
-  const inputCueBudget = targetBudget * (1 - OUTPUT_RESERVE_RATIO)
+  const inputCueBudget = targetBudget * (1 - DEFAULT_OUTPUT_RESERVE_RATIO)
 
   // 4. Compute optimal chunk size from context window
   let rawChunkSize = Math.floor(inputCueBudget / safeAvgCueTokens)
 
-  // 5. Apply maxOutputTokens constraint if available
+  // 5. Apply maxOutputTokens constraint scaled by stability threshold
   // Each cue produces roughly 1 translated cue worth of output tokens
   if (maxOutputTokens && maxOutputTokens > 0) {
-    const outputConstraint = Math.floor(maxOutputTokens / safeAvgCueTokens)
+    const effectiveOutputBudget = maxOutputTokens * outputStabilityThreshold
+    const outputConstraint = Math.floor(effectiveOutputBudget / safeAvgCueTokens)
     rawChunkSize = Math.min(rawChunkSize, outputConstraint)
   }
 
@@ -112,4 +130,86 @@ export function estimateAvgCueTokens(document: SubtitleDocument, sourceLanguage?
   const totalChars = document.cues.reduce((sum, cue) => sum + cue.plainText.length, 0)
   const avgChars = totalChars / document.cues.length
   return Math.max(5, Math.ceil(avgChars / charsPerToken))
+}
+
+// ── Token-Budget-First Chunking ──────────────────────────────────
+
+export interface AdaptiveChunkBudget {
+  /** Per-chunk token budget for target cues (input side) */
+  targetTokenBudget: number
+  /** Safety guardrail: max cue count per chunk */
+  maxCueCount: number
+  /** Estimated average tokens per cue */
+  avgCueTokens: number
+}
+
+/**
+ * Calculate a token-budget-first chunk sizing.
+ *
+ * Instead of returning a cue count, returns a token budget that the chunk builder
+ * uses to accumulate cues until the budget is reached. This produces variable-size
+ * chunks where short cues produce larger chunks and long cues produce smaller ones.
+ *
+ * Algorithm:
+ * 1. Compute available tokens (safeInputBudget or contextWindow × contextUsageTarget)
+ * 2. Subtract overheads (system prompt, schema, memory, context cues)
+ * 3. Apply output reserve → inputCueBudget
+ * 4. Apply maxOutputTokens × outputStabilityThreshold constraint
+ * 5. targetTokenBudget = min(inputCueBudget, outputTokenBudget)
+ * 6. maxCueCount from dynamicMaxChunkSize() as safety guardrail
+ */
+export function calculateAdaptiveChunkBudget(params: AdaptiveChunkParams): AdaptiveChunkBudget {
+  const {
+    contextWindow,
+    avgCueTokens,
+    lookbehind,
+    lookahead,
+    contextUsageTarget,
+    outputStrategy,
+    systemPromptOverhead = 400,
+    maxOutputTokens,
+    totalCues,
+    safeInputBudget,
+    hardChunkCeiling,
+    outputStabilityThreshold = 0.85,
+  } = params
+
+  let maxCueCount = dynamicMaxChunkSize(totalCues)
+
+  // Apply hard chunk ceiling if set
+  if (hardChunkCeiling != null && hardChunkCeiling > 0) {
+    maxCueCount = Math.min(maxCueCount, hardChunkCeiling)
+  }
+
+  const safeAvgCueTokens = Math.max(1, avgCueTokens)
+
+  // 1. Total available tokens
+  const availableTokens = (safeInputBudget != null && safeInputBudget > 0)
+    ? safeInputBudget
+    : (contextWindow ?? FALLBACK_CONTEXT_TOKENS) * contextUsageTarget
+
+  // 2. Calculate overhead
+  const schemaOverhead = outputStrategy === 'structured' ? STRUCTURED_SCHEMA_OVERHEAD : 0
+  const contextCueTokens = (lookbehind + lookahead) * safeAvgCueTokens
+  const totalOverhead = systemPromptOverhead + schemaOverhead + MEMORY_OVERHEAD + contextCueTokens
+
+  // 3. Input cue budget (after reserving output space)
+  const targetBudget = Math.max(0, availableTokens - totalOverhead)
+  let inputCueBudget = targetBudget * (1 - DEFAULT_OUTPUT_RESERVE_RATIO)
+
+  // 4. Apply maxOutputTokens constraint scaled by stability threshold
+  if (maxOutputTokens && maxOutputTokens > 0) {
+    const effectiveOutputBudget = maxOutputTokens * outputStabilityThreshold
+    inputCueBudget = Math.min(inputCueBudget, effectiveOutputBudget)
+  }
+
+  // 5. Ensure a minimum budget (at least a few cues)
+  const minTokenBudget = MIN_CHUNK_SIZE * safeAvgCueTokens
+  const targetTokenBudget = Math.max(minTokenBudget, inputCueBudget)
+
+  return {
+    targetTokenBudget,
+    maxCueCount,
+    avgCueTokens: safeAvgCueTokens,
+  }
 }

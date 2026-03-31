@@ -31,7 +31,6 @@ export function DiagnosticsExport() {
         enableAnalysis: state.enableAnalysis,
         enableReview: state.enableReview,
         bilingualOutput: state.bilingualOutput,
-        chunkSize: state.chunkSize,
         lookbehind: state.lookbehind,
         lookahead: state.lookahead,
       },

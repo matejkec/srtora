@@ -1,27 +1,53 @@
-import type { QualityModeId, QualityModeConfig } from '@srtora/types'
-import { QUALITY_MODES } from '@srtora/pipeline'
+import type { QualityModeId } from '@srtora/types'
 
-// Re-export quality mode types for the UI layer
+/** UI preset IDs map directly to quality mode IDs */
 export type PresetId = QualityModeId
 
-export type { QualityModeConfig as PresetConfig }
+export interface PresetConfig {
+  id: PresetId
+  label: string
+  description: string
+  enableAnalysis: boolean
+  enableReview: boolean
+  lookbehind: number
+  lookahead: number
+}
 
-/**
- * Quality mode presets, re-exported from the pipeline package.
- * Maps: fast, balanced, high-quality, maximum
- */
-export const PRESETS: Record<PresetId, QualityModeConfig> = QUALITY_MODES
-
-/**
- * Backward-compatible migration from legacy preset IDs to quality mode IDs.
- * Old presets: simple → fast, balanced → balanced, quality → high-quality, advanced → maximum
- */
-export function migratePresetId(legacyId: string): PresetId {
-  const migration: Record<string, PresetId> = {
-    simple: 'fast',
-    balanced: 'balanced',
-    quality: 'high-quality',
-    advanced: 'maximum',
-  }
-  return migration[legacyId] ?? (legacyId as PresetId)
+export const PRESETS: Record<PresetId, PresetConfig> = {
+  fast: {
+    id: 'fast',
+    label: 'Fast',
+    description: 'Quick translation without analysis or review',
+    enableAnalysis: false,
+    enableReview: false,
+    lookbehind: 2,
+    lookahead: 1,
+  },
+  balanced: {
+    id: 'balanced',
+    label: 'Balanced',
+    description: 'Analysis + translation with light review',
+    enableAnalysis: true,
+    enableReview: true,
+    lookbehind: 3,
+    lookahead: 3,
+  },
+  'high-quality': {
+    id: 'high-quality',
+    label: 'High Quality',
+    description: 'Smaller chunks with multi-pass review for precision',
+    enableAnalysis: true,
+    enableReview: true,
+    lookbehind: 5,
+    lookahead: 5,
+  },
+  maximum: {
+    id: 'maximum',
+    label: 'Maximum',
+    description: 'Full pipeline with terminology enforcement and consistency validation',
+    enableAnalysis: true,
+    enableReview: true,
+    lookbehind: 7,
+    lookahead: 5,
+  },
 }

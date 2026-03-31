@@ -11,9 +11,10 @@ Local-first AI subtitle translation. Upload an `.srt` or `.vtt` file, translate 
 - **Context-aware chunking** — overlapping chunks with lookbehind/lookahead for translation continuity
 - **Session memory** — extracts speakers, terminology, and tone from the document for consistent translations
 - **Structured output** — JSON schema enforcement for reliable LLM responses with automatic repair
+- **Adaptive chunk sizing** — token-budget-first chunking that sizes chunks based on model token budgets, producing variable-size chunks where short cues yield larger chunks and long cues yield smaller ones
 - **Review phase** — automated flagging (empty translations, missing tags, length issues, term inconsistency) with LLM correction
 - **Bilingual output** — optional side-by-side source + target subtitle file
-- **TranslateGemma support** — auto-detects Gemma models and switches to the appropriate prompt strategy
+- **Curated model registry** — 13 supported models with individually tuned execution profiles for chunk sizing, prompt strategy, output method, and retry behavior
 
 ## Quick Start
 
@@ -51,7 +52,7 @@ srtora/
 ├── packages/
 │   ├── types/                # Zod schemas + TypeScript types
 │   ├── core/                 # SRT/VTT parsing, assembly, chunking, validation
-│   ├── adapters/             # LLM provider adapters (Ollama, OpenAI-compatible)
+│   ├── adapters/             # LLM provider adapters + model registry
 │   ├── prompts/              # Prompt builders, strategies, JSON schemas
 │   ├── pipeline/             # Pipeline orchestrator + progress tracking
 │   └── ui/                   # Shared UI components
@@ -80,14 +81,14 @@ See [docs/development.md](docs/development.md) for the full development guide.
 
 ## Testing
 
-107 tests across 4 packages using Vitest:
+418 tests across 4 packages using Vitest:
 
 | Package | Tests | Coverage |
 |---------|-------|----------|
-| `@srtora/core` | 70 | SRT/VTT parsing, assembly, chunking, validation |
-| `@srtora/adapters` | 17 | JSON repair, retry logic |
+| `@srtora/core` | 114 | SRT/VTT parsing, assembly, chunking, validation, token estimation, budget chunking |
+| `@srtora/adapters` | 201 | Model registry, JSON repair, output strategy, retry logic |
 | `@srtora/prompts` | 15 | Prompt builders, strategies |
-| `@srtora/pipeline` | 5 | Progress tracking |
+| `@srtora/pipeline` | 88 | Profile resolver, progress tracking, quality modes, pipeline orchestration |
 
 ```bash
 # Run all tests
@@ -102,14 +103,14 @@ cd packages/core && pnpm vitest
 
 ## Supported Providers
 
-| Provider | Type | Endpoint |
-|----------|------|----------|
-| Ollama | Local | `http://localhost:11434` |
-| MLX Server | Local | `http://localhost:8080` |
-| LM Studio | Local | `http://localhost:1234` |
-| OpenAI | Cloud | `https://api.openai.com/v1` |
-| Google Gemini | Cloud | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| Anthropic | Cloud | Requires CORS proxy |
+| Provider | Type | Endpoint | Supported Models |
+|----------|------|----------|-----------------|
+| Ollama | Local | `http://localhost:11434` | 4 models (qwen3, gemma3, mistral-small, llama3) |
+| MLX Server | Local | `http://localhost:8080` | Experimental (conservative defaults) |
+| LM Studio | Local | `http://localhost:1234` | Experimental (conservative defaults) |
+| OpenAI | Cloud | `https://api.openai.com` | gpt-5.4, gpt-5.4-mini |
+| Google Gemini | Cloud | `https://generativelanguage.googleapis.com/v1beta/openai` | gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.1-flash-lite-preview, gemini-2.5-flash |
+| Anthropic | Cloud | Requires CORS proxy | claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5 |
 
 ## Tech Stack
 
@@ -126,6 +127,7 @@ cd packages/core && pnpm vitest
 - [Architecture](docs/architecture.md) — system overview, package dependencies, data flow, design decisions
 - [Translation Pipeline](docs/pipeline.md) — pipeline phases, chunking strategy, structured output, retry handling
 - [Provider Setup](docs/providers.md) — setup guides for all supported providers
+- [Supported Models](docs/models.md) — curated model list, execution profiles, adding models
 - [Development Guide](docs/development.md) — dev setup, testing, adding adapters and strategies
 
 ## License

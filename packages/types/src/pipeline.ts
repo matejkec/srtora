@@ -1,7 +1,5 @@
 import { z } from 'zod'
 import { ProviderConfigSchema } from './provider.js'
-import { QualityModeIdSchema } from './quality-mode.js'
-import { OutputStrategyTypeSchema, ResolvedCapabilitiesSchema } from './capabilities.js'
 import { TranslationMemorySchema } from './memory.js'
 
 export const PipelinePhaseSchema = z.enum([
@@ -36,6 +34,30 @@ export const ProgressEventSchema = z.object({
 })
 export type ProgressEvent = z.infer<typeof ProgressEventSchema>
 
+// ── Quality Mode ──────────────────────────────────────────────
+
+export const QualityModeIdSchema = z.enum(['fast', 'balanced', 'high-quality', 'maximum'])
+export type QualityModeId = z.infer<typeof QualityModeIdSchema>
+
+export const QualityModeConfigSchema = z.object({
+  id: QualityModeIdSchema,
+  label: z.string(),
+  description: z.string(),
+  enableAnalysis: z.boolean(),
+  enableReview: z.boolean(),
+  reviewPasses: z.number().int().nonnegative(),
+  chunkSizingStrategy: z.enum(['adaptive', 'fixed']),
+  contextUsageTarget: z.number().min(0.1).max(1.0),
+  lookbehind: z.number().int().nonnegative(),
+  lookahead: z.number().int().nonnegative(),
+  maxRetries: z.number().int().nonnegative(),
+  enforceTerminology: z.boolean(),
+  validateSpeakerConsistency: z.boolean(),
+})
+export type QualityModeConfig = z.infer<typeof QualityModeConfigSchema>
+
+// ── Pipeline Config ───────────────────────────────────────────
+
 export const PipelineConfigSchema = z.object({
   sourceLanguage: z.string(),
   targetLanguage: z.string(),
@@ -45,21 +67,18 @@ export const PipelineConfigSchema = z.object({
   reviewModel: z.string().optional(),
   enableAnalysis: z.boolean().optional(),
   enableReview: z.boolean().optional(),
-  bilingualOutput: z.boolean().optional(),
-  chunkSize: z.number().int().min(4).max(100).optional(),
-  lookbehind: z.number().int().min(0).max(10).optional(),
-  lookahead: z.number().int().min(0).max(10).optional(),
+  bilingualOutput: z.boolean().default(false),
+  lookbehind: z.number().int().min(0).max(20).default(3),
+  lookahead: z.number().int().min(0).max(20).default(3),
   tonePreference: z.string().optional(),
-  maxRetries: z.number().int().min(0).max(5).optional(),
-  /** Quality mode — when set, overrides analysis/review/chunking defaults */
+  maxRetries: z.number().int().min(0).max(5).default(2),
+  /** Quality mode preset */
   qualityMode: QualityModeIdSchema.optional(),
-  /** Override output strategy. Null = auto-detect from model capabilities. */
-  outputStrategy: OutputStrategyTypeSchema.optional(),
-  /** Translation memory to inject into prompts */
+  /** Number of review passes (overrides quality mode) */
+  reviewPasses: z.number().int().min(0).max(5).optional(),
+  /** Ollama family tag for model matching */
+  ollamaFamily: z.string().optional(),
+  /** Translation memory from previous sessions */
   translationMemory: TranslationMemorySchema.optional(),
-  /** Resolved model capabilities (injected by orchestrator setup) */
-  modelCapabilities: ResolvedCapabilitiesSchema.optional(),
-  /** Number of review passes (overrides quality mode default) */
-  reviewPasses: z.number().int().min(0).max(3).optional(),
 })
 export type PipelineConfig = z.infer<typeof PipelineConfigSchema>

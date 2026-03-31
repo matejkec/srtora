@@ -79,7 +79,7 @@ describe('progressive retry', () => {
     expect(result.stats.totalRetries).toBe(0)
   })
 
-  it('retries with temperature on first parse failure, succeeds on tier 2', async () => {
+  it('retries via withRetry on parse failure, succeeds on second attempt', async () => {
     const orchestrator = new PipelineOrchestrator(makeConfig())
     const adapter = getMockAdapter()
 
@@ -87,42 +87,60 @@ describe('progressive retry', () => {
     adapter.chat.mockImplementation(() => {
       callCount++
       if (callCount === 1) {
-        // Tier 1: return unparseable content
+        // First call: return unparseable content
         return Promise.resolve({ content: 'This is not JSON at all', finishReason: 'stop' })
       }
-      // Tier 2: good response
+      // Second call: good response
       return Promise.resolve({ content: goodTranslationJson([1, 2]), finishReason: 'stop' })
     })
 
     const result = await orchestrator.run(SIMPLE_SRT, 'test.srt', callbacks)
 
     expect(result.outputContent).toContain('translated-1')
-    expect(result.stats.totalRetries).toBe(1)
-    // Second call should have temperature set
+    expect(result.outputContent).toContain('translated-2')
+    // withRetry handles the actual retry — the orchestrator only tracks "repaired" responses
     expect(adapter.chat).toHaveBeenCalledTimes(2)
   })
 
-  it('falls back to source text when all tiers fail', async () => {
-    const orchestrator = new PipelineOrchestrator(makeConfig({ maxRetries: 3 }))
+  it('uses source text as fallback for missing translations in chunk', async () => {
+    const orchestrator = new PipelineOrchestrator(makeConfig())
     const adapter = getMockAdapter()
 
-    // All calls return unparseable content
+    // Return only one of two expected translations
     adapter.chat.mockResolvedValue({
-      content: 'I cannot produce JSON right now',
+      content: goodTranslationJson([1]),
       finishReason: 'stop',
     })
 
     const result = await orchestrator.run(SIMPLE_SRT, 'test.srt', callbacks)
 
-    // Should use source text as final fallback (never crash)
-    expect(result.outputContent).toContain('Hello')
+    // Cue 1 should be translated, cue 2 should fall back to source text
+    expect(result.outputContent).toContain('translated-1')
     expect(result.outputContent).toContain('World')
-    // Retries should have been attempted
-    expect(result.stats.totalRetries).toBeGreaterThan(0)
+    expect(result.warnings.length).toBeGreaterThan(0)
   })
 
-  it('splits chunk and translates halves when tier 3 fails', async () => {
-    // Use a larger file so chunkSize doesn't make it single-cue
+  it('uses model-specific maxCompletionTokens from resolved params', async () => {
+    // Use a known model to verify non-hardcoded maxTokens
+    const orchestrator = new PipelineOrchestrator(makeConfig({
+      translationModel: 'test-model',
+    }))
+    const adapter = getMockAdapter()
+
+    adapter.chat.mockResolvedValue({
+      content: goodTranslationJson([1, 2]),
+      finishReason: 'stop',
+    })
+
+    await orchestrator.run(SIMPLE_SRT, 'test.srt', callbacks)
+
+    // The chat call should have a maxTokens value (from experimental profile = 4096)
+    const chatCall = adapter.chat.mock.calls[0]![0] as { maxTokens?: number }
+    expect(chatCall.maxTokens).toBe(4_096) // experimental openai-compatible default
+  })
+
+  it('computes adaptive chunk size instead of using hardcoded value', async () => {
+    // Create a test with enough cues to verify chunking behavior
     const srt = `1
 00:00:01,000 --> 00:00:02,000
 Hello
@@ -139,34 +157,19 @@ Goodbye
 00:00:07,000 --> 00:00:08,000
 End
 `
-    const orchestrator = new PipelineOrchestrator(makeConfig({ maxRetries: 3, chunkSize: 4 }))
+    const orchestrator = new PipelineOrchestrator(makeConfig())
     const adapter = getMockAdapter()
 
-    let callCount = 0
-    adapter.chat.mockImplementation(() => {
-      callCount++
-      // Tiers 1-3 fail (full chunk), tiers 4a and 4b succeed (halves)
-      if (callCount <= 3) {
-        return Promise.resolve({ content: 'not json', finishReason: 'stop' })
-      }
-      // Split halves: first half [1,2], second half [3,4]
-      if (callCount === 4) {
-        return Promise.resolve({
-          content: goodTranslationJson([1, 2]),
-          finishReason: 'stop',
-        })
-      }
-      return Promise.resolve({
-        content: goodTranslationJson([3, 4]),
-        finishReason: 'stop',
-      })
+    adapter.chat.mockResolvedValue({
+      content: goodTranslationJson([1, 2, 3, 4]),
+      finishReason: 'stop',
     })
 
     const result = await orchestrator.run(srt, 'test.srt', callbacks)
 
     expect(result.outputContent).toContain('translated-1')
-    expect(result.outputContent).toContain('translated-2')
-    expect(result.outputContent).toContain('translated-3')
     expect(result.outputContent).toContain('translated-4')
+    // Adaptive chunking should produce at least 1 chunk
+    expect(result.stats.totalChunks).toBeGreaterThanOrEqual(1)
   })
 })

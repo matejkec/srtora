@@ -6,14 +6,23 @@ export { withRetry } from './retry.js'
 export type { RetryOptions } from './retry.js'
 export { repairJson, parseJsonSafe } from './json-repair.js'
 export { buildTranslateGemmaPrompt } from './translate-gemma-prompt.js'
-export {
-  lookupModelProfile,
-  getProviderDefaults,
-  mergeWithProviderOverrides,
-} from './capability-registry.js'
-export { resolveCapabilities, selectOutputStrategy } from './capability-resolver.js'
+
 export {
   augmentPromptForJson,
   prepareRequest,
+  prepareRequestForMethod,
   isStructuredOutputError,
 } from './output-strategy.js'
+
+// Model Registry — first-class supported model system
+export {
+  getRegistryEntry,
+  resolveExecutionProfile,
+  getModelCapabilities,
+  listSupportedModels,
+  listSupportedModelsGrouped,
+  matchDetectedModels,
+  getExperimentalProfile,
+  EXPERIMENTAL_CAPABILITIES,
+} from './model-registry/index.js'
+export type { AnnotatedModel } from './model-registry/index.js'

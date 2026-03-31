@@ -56,10 +56,10 @@ Tests use **Vitest** and are located in `src/__tests__/` within each package.
 
 | Package | Tests | Description |
 |---------|-------|-------------|
-| `packages/core` | 70 | SRT/VTT parsing, assembly, chunking, validation |
-| `packages/adapters` | 17 | JSON repair, retry logic |
+| `packages/core` | 114 | SRT/VTT parsing, assembly, chunking, token-budget chunking, validation, token estimation |
+| `packages/adapters` | 245 | Model registry matching, JSON repair, output strategy, retry logic |
 | `packages/prompts` | 15 | Prompt builders, strategies |
-| `packages/pipeline` | 5 | Progress tracking |
+| `packages/pipeline` | 103 | Profile resolver, progress tracking, quality modes, memory injector |
 
 ### Writing Tests
 
@@ -91,12 +91,22 @@ Subtitle test fixtures are in `packages/core/src/__tests__/fixtures/`:
 4. Add the provider type to `ProviderTypeSchema` in `packages/types/src/provider.ts`
 5. Add a UI option in `apps/web/src/components/config/provider-selector.tsx`
 
+## Adding a New Supported Model
+
+1. Create or edit the appropriate profile file in `packages/adapters/src/model-registry/profiles/` (organized by provider: `openai.ts`, `google.ts`, `anthropic.ts`, `ollama.ts`)
+2. Define a `ModelRegistryEntry` with all required fields: `id`, `displayName`, `provider`, `tier`, `category`, `contextWindow`, `maxOutputTokens`, `executionProfile`
+3. For Ollama models, add `matchPatterns` (regex) and `ollamaFamily` for runtime discovery matching
+4. The entry is automatically included in `registry-data.ts` and available through the public API
+5. No other code changes needed — the matcher, profile resolver, UI model selector, and pipeline all pick up new entries automatically
+6. Run `pnpm test` and `pnpm build` to verify
+
 ## Adding a New Prompt Strategy
 
 1. Create a class implementing `PromptStrategy` in `packages/prompts/src/strategies/`
 2. Implement `formatMessages(system, user)` to return `ChatMessage[]`
-3. Export from `packages/prompts/src/index.ts`
-4. Add auto-detection logic in the orchestrator constructor (`packages/pipeline/src/orchestrator.ts`)
+3. Add a new `PromptStyleId` value in `packages/types/src/model-registry.ts`
+4. Register it in `packages/prompts/src/strategies/strategy-factory.ts`
+5. Export from `packages/prompts/src/index.ts`
 
 ## Code Style
 
@@ -133,3 +143,13 @@ LLM outputs are often imperfect JSON. The `parseJsonSafe()` function:
 1. Tries direct `JSON.parse()`
 2. On failure, runs `repairJson()` (strips markdown fences, fixes trailing commas, closes brackets)
 3. Returns `{ data, repaired }` or `null` if unrepairable
+
+### Model Registry
+
+Each supported model has an execution profile that controls translation behavior. The profile resolver merges three layers:
+
+```
+Model Profile (base) × Quality Mode (scaling) × User Config (overrides)
+```
+
+For details, see [Supported Models](../docs/models.md).

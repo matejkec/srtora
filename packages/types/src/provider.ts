@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { ModelCapabilitiesSchema } from './capabilities.js'
 
 export const ProviderTypeSchema = z.enum([
   'ollama',
@@ -32,7 +31,5 @@ export const ModelInfoSchema = z.object({
   supportsStructuredOutput: z.boolean().default(true),
   supportsStreaming: z.boolean().default(true),
   contextLength: z.number().optional(),
-  /** Rich capability profile. When absent, uses provider defaults. */
-  capabilities: ModelCapabilitiesSchema.optional(),
 })
 export type ModelInfo = z.infer<typeof ModelInfoSchema>

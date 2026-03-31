@@ -18,17 +18,32 @@ ollama serve
 
 The server runs on `http://localhost:11434` by default.
 
-#### Recommended Models
+#### Supported Models
 
-| Model | Use Case | Pull Command |
+SRTora has tuned execution profiles for these Ollama models:
+
+| Model | Category | Pull Command |
 |-------|----------|-------------|
-| `gemma3:4b` | General translation + analysis | `ollama pull gemma3:4b` |
-| `gemma3:12b` | Higher quality translation | `ollama pull gemma3:12b` |
-| `qwen2.5:7b` | Good multilingual support | `ollama pull qwen2.5:7b` |
+| `translategemma:4b` | Local Translation | `ollama pull translategemma:4b` |
+| `translategemma:12b` | Local Translation | `ollama pull translategemma:12b` |
+| `gemma3:4b` | Local Analysis | `ollama pull gemma3:4b` |
+| `gemma3:12b` | Local Analysis | `ollama pull gemma3:12b` |
+
+Other Ollama models will work with experimental (conservative) defaults. For the full list with execution profile details, see [Supported Models](models.md).
 
 #### TranslateGemma
 
-For dedicated translation models, SRTora auto-detects Gemma family models and uses the appropriate prompt strategy (single user message, no system role).
+TranslateGemma is a purpose-built translation model available in 4B and 12B variants. SRTora automatically detects it via the model registry and uses the appropriate raw completion prompt strategy.
+
+```bash
+# Lighter variant — good for most translation tasks
+ollama pull translategemma:4b
+
+# Larger variant — higher quality for complex content
+ollama pull translategemma:12b
+```
+
+Note: TranslateGemma requires an explicit source language — auto-detect is not supported. Analysis and review phases are automatically disabled.
 
 ### MLX / OpenAI-Compatible Servers
 
@@ -54,6 +69,10 @@ mlx_lm.server --model mlx-community/gemma-2-2b-it-4bit --port 8080
 3. Start the local server (Settings → Local Server)
 4. Connect SRTora to `http://localhost:1234`
 
+#### Registry Matching
+
+When using an OpenAI-compatible provider, SRTora attempts to match the reported model name against its model registry. If a match is found (e.g., running a `gemma3` variant via MLX), the corresponding execution profile is applied automatically. Unrecognized models fall back to conservative experimental defaults.
+
 ## Cloud Providers
 
 ### OpenAI
@@ -63,7 +82,7 @@ mlx_lm.server --model mlx-community/gemma-2-2b-it-4bit --port 8080
 3. Enter your API key
 4. Click **Test** to connect and discover models
 
-Recommended models: `gpt-4o-mini`, `gpt-4o`
+Supported models: `gpt-5.4` (premium), `gpt-5.4-mini` (balanced)
 
 ### Google Gemini
 
@@ -75,19 +94,26 @@ Recommended models: `gpt-4o-mini`, `gpt-4o`
 SRTora uses Google's OpenAI-compatible endpoint at:
 `https://generativelanguage.googleapis.com/v1beta/openai`
 
-Recommended models: `gemini-2.0-flash`, `gemini-1.5-pro`
+Supported models: `gemini-3.1-pro-preview` (premium), `gemini-3-flash-preview` (balanced), `gemini-3.1-flash-lite-preview` (budget), `gemini-2.5-flash` (balanced, stable fallback)
 
 ### Anthropic
 
-Anthropic's API does not support CORS from browser applications. To use Anthropic models, you need a CORS proxy.
+Anthropic's API does not support CORS from browser applications. SRTora provides a dedicated proxy setup section when Anthropic is selected.
 
-1. Set up a CORS proxy (e.g., Cloudflare Worker)
+#### Quick Start
+
+1. Run a local CORS proxy:
+   ```bash
+   npx @anthropic-ai/cors-proxy@latest
+   ```
 2. In SRTora, select **Anthropic** under Cloud providers
 3. Enter your API key
-4. Change the endpoint URL to your proxy address
-5. Click **Test** to connect
+4. The proxy URL defaults to `http://localhost:8787` — change if needed
+5. Click **Test Connection**
 
-Recommended models: `claude-sonnet-4-20250514`
+Alternatively, deploy a Cloudflare Worker proxy for persistent use.
+
+Supported models: `claude-opus-4-6` (premium), `claude-sonnet-4-6` (balanced), `claude-haiku-4-5` (budget)
 
 ## Connection Testing
 

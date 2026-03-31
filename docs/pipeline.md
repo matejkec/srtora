@@ -32,7 +32,7 @@ SRTora uses a 5-phase translation pipeline that processes subtitle files through
 
 ### Chunking Strategy
 
-Documents are split into overlapping chunks:
+Documents are split into overlapping chunks using **token-budget-first sizing**:
 
 ```
 Chunk 1:  [context_before] [TARGET_CUES] [context_after]
@@ -40,10 +40,22 @@ Chunk 2:              [context_before] [TARGET_CUES] [context_after]
 Chunk 3:                          [context_before] [TARGET_CUES] [context_after]
 ```
 
-- **chunkSize**: Number of target cues per chunk (default: 15)
-- **lookbehind**: Number of already-translated cues shown as context (default: 3)
-- **lookahead**: Number of upcoming cues shown as context (default: 3)
+- **Token budget**: Each chunk accumulates cues until the per-chunk token budget is reached. This produces variable-size chunks — short cues (one-word subtitles) group into larger chunks, while long cues (dense dialogue) produce smaller chunks. The budget is derived from the model's context window, output limits, quality mode, and per-model tuning.
+- **maxCueCount guardrail**: Safety limit of 100/200/300 cues per chunk (based on file size). Prevents pathologically large chunks even with huge token budgets.
+- **Fixed fallback**: Models with `idealChunkTarget` set use fixed cue-count chunking instead.
+- **lookbehind**: Number of already-translated cues shown as context (default: 3, tunable via quality mode and config)
+- **lookahead**: Number of upcoming cues shown as context (default: 3, tunable via quality mode and config)
 - Previous translations are included with context cues for continuity
+
+### Translation Memory Injection
+
+Session memory from the analysis phase is filtered before injection into translation prompts based on the model's `memoryInjection` profile field:
+
+- **`full`** — Complete memory (speakers, terms, style notes). Used by most cloud models.
+- **`terms-only`** — Only glossary/terminology entries (speakers stripped). Used by budget and local models to conserve context.
+- **`none`** — No memory injected. Used by TranslateGemma (translation-only models).
+
+The analysis phase still runs independently when enabled — `memoryInjection` only controls what gets passed into translation and review prompts.
 
 ### Prompt Structure
 
@@ -72,17 +84,28 @@ User:   --- CONTEXT (already translated) ---
 
 ### Strategy Selection
 
-The orchestrator auto-detects which prompt strategy to use:
+The orchestrator selects the prompt strategy based on the model's execution profile:
 
-- **DefaultStrategy**: Separate system + user messages (most models)
-- **GemmaStrategy**: Single user message combining both (TranslateGemma, Gemma models)
+- **DefaultStrategy** (`promptStyleId: 'default'`): Separate system + user messages (most models)
+- **NoSystemRoleStrategy** (`promptStyleId: 'no-system-role'`): Single user message combining system context + user content (Gemma models and models that don't support the system role)
+- **Raw completion** (`promptStyleId: 'raw-completion'`): Direct text completion without chat formatting (TranslateGemma)
 
-Detection is based on the model name containing "gemma".
+Strategy selection is automatic — determined by the model's registry entry, not heuristic model name matching.
 
 ## Phase 3: Review (Optional)
 
 **Input:** All translations + session memory + source cues
 **Output:** Corrections for flagged issues
+
+### Review Depth
+
+The review phase is gated by the model's `reviewDepth` profile field:
+
+- **`thorough`** — Full multi-pass review. Used by premium models (GPT-5.4, Gemini 3.1 Pro, Claude Opus).
+- **`basic`** — Standard single-pass review. Used by balanced, budget, and local analysis models.
+- **`none`** — Review phase is skipped entirely. Used by translation-only models (TranslateGemma).
+
+When `enableReview` is `true` in the pipeline config but the model's `reviewDepth` is `none`, the review phase is still skipped.
 
 ### Automated Flagging
 
@@ -119,6 +142,14 @@ If review fails, the pipeline continues with the original translations.
 - Non-recoverable errors (auth, model not found) fail immediately
 - Recoverable errors (server errors, rate limits) are retried
 - Pipeline supports `AbortSignal` for cancellation at any point
+
+### Profile-Driven Retry
+
+Retry behavior is tuned per model:
+
+- **Temperature escalation**: Tier 2 and Tier 3 retry temperatures come from the model's execution profile (not hardcoded)
+- **Retry delay**: Local models use 200ms base delay (no rate limits); cloud models use 1000-2000ms
+- **Max retries**: Determined by quality mode, overridable by the model profile and user config
 
 ## Progress Tracking
 

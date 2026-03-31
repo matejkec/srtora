@@ -16,11 +16,9 @@ export function PresetSelector() {
 
   if (!file) return null
 
-  const selectedConfig = PRESETS[preset]
-
   return (
     <div>
-      <label className="text-xs font-medium text-muted-foreground mb-2 block">Quality Mode</label>
+      <label className="text-xs font-medium text-muted-foreground mb-2 block">Preset</label>
       <div className="grid grid-cols-4 gap-2">
         {(Object.entries(PRESETS) as [PresetId, (typeof PRESETS)[PresetId]][]).map(
           ([id, config]) => (
@@ -35,7 +33,6 @@ export function PresetSelector() {
                     : 'border-border hover:border-muted-foreground'
                 }
               `}
-              title={config.description}
             >
               {PRESET_ICONS[id]}
               <span className="text-xs font-medium">{config.label}</span>
@@ -43,9 +40,6 @@ export function PresetSelector() {
           ),
         )}
       </div>
-      {selectedConfig && (
-        <p className="text-xs text-muted-foreground mt-2">{selectedConfig.description}</p>
-      )}
     </div>
   )
 }

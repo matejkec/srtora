@@ -1,4 +1,4 @@
-import type { OutputStrategyType } from '@srtora/types'
+import type { OutputStrategyType, StructuredOutputMethod } from '@srtora/types'
 import type { ChatRequest } from './types.js'
 
 /**
@@ -101,4 +101,66 @@ export function isStructuredOutputError(error: unknown): boolean {
   }
 
   return false
+}
+
+// ── New: Method-based request preparation ──────────────────────
+
+/**
+ * Prepare a chat request based on the model's StructuredOutputMethod.
+ *
+ * This is the new API that works with the model registry's execution profiles.
+ * Each supported model defines its own structuredOutputMethod, which determines
+ * how JSON output is requested from the model.
+ *
+ * - 'json-schema': Pass jsonSchema via response_format (OpenAI native)
+ * - 'ollama-format': Pass jsonSchema via Ollama's format field (handled by adapter)
+ * - 'prompted': Strip jsonSchema, inject JSON instructions into prompt text
+ * - 'none': No JSON handling (raw text models like TranslateGemma)
+ */
+export function prepareRequestForMethod(
+  request: ChatRequest,
+  method: StructuredOutputMethod,
+): ChatRequest {
+  switch (method) {
+    case 'json-schema':
+    case 'ollama-format':
+      // Both use the structured strategy — adapter handles the difference
+      return { ...request, outputStrategy: 'structured' }
+
+    case 'prompted': {
+      // Strip jsonSchema, inject JSON instructions into prompt text
+      if (!request.jsonSchema) {
+        return { ...request, outputStrategy: 'prompted' }
+      }
+
+      const messages = [...request.messages]
+      const lastIdx = messages.length - 1
+
+      if (lastIdx >= 0 && messages[lastIdx]!.role === 'user') {
+        messages[lastIdx] = {
+          ...messages[lastIdx]!,
+          content: augmentPromptForJson(messages[lastIdx]!.content, request.jsonSchema),
+        }
+      } else if (lastIdx >= 0) {
+        for (let i = lastIdx; i >= 0; i--) {
+          if (messages[i]!.role === 'user') {
+            messages[i] = {
+              ...messages[i]!,
+              content: augmentPromptForJson(messages[i]!.content, request.jsonSchema),
+            }
+            break
+          }
+        }
+      }
+
+      const { jsonSchema: _schema, ...rest } = request
+      return { ...rest, messages, outputStrategy: 'prompted' }
+    }
+
+    case 'none': {
+      // No JSON handling — strip jsonSchema entirely
+      const { jsonSchema: _s, ...rest } = request
+      return { ...rest, outputStrategy: 'raw' }
+    }
+  }
 }

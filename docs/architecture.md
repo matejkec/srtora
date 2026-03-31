@@ -47,6 +47,8 @@ LLM provider communication:
 - **OpenAICompatibleAdapter** — OpenAI-compatible APIs (covers MLX, OpenAI, Gemini, Anthropic)
 - **JSON repair** — Fixes malformed LLM output
 - **Retry** — Exponential backoff with jitter and abort support
+- **Model registry** — Curated registry of 13 supported models with per-model execution profiles
+- **Registry matching** — Annotates runtime-discovered models against the registry (exact → family → pattern matching)
 
 ### `@srtora/prompts`
 Translation prompt construction:
@@ -58,6 +60,7 @@ Translation prompt construction:
 Pipeline orchestration:
 - **Orchestrator** — Coordinates the full 5-phase pipeline
 - **Progress Tracker** — Weighted progress calculation with ETA estimation
+- **Profile Resolver** — Merges model execution profile × quality mode × user config into final execution parameters
 
 ### `apps/web`
 Next.js 15 frontend:
@@ -127,5 +130,6 @@ Cloud mode uses the same orchestrator and pipeline logic. The only difference is
 1. **No backend for local mode** — Direct browser → localhost communication
 2. **Sequential chunk translation** — Maintains context via `previousTranslations` map
 3. **Zod for runtime validation** — All LLM output is validated against schemas
-4. **Auto-detect prompt strategy** — Model name triggers GemmaStrategy for Gemma models
-5. **Structured output enforcement** — JSON schemas passed to adapters for native enforcement
+4. **Model registry drives execution** — Each supported model has a tuned execution profile controlling chunk sizing, output method, prompt strategy, retry temperatures, and feature flags. Unknown models use conservative experimental defaults.
+5. **Three-layer parameter resolution** — Execution parameters merge from model profile (base) → quality mode (scaling) → user config (overrides). Each layer can only narrow or refine what the previous layer set.
+6. **Token-budget-first chunking** — Chunks are sized by token budget, not fixed cue count. The pipeline accumulates cues until the per-chunk token budget is reached, producing variable-size chunks adapted to actual content density. A cue count guardrail (100/200/300) prevents pathologically large chunks.

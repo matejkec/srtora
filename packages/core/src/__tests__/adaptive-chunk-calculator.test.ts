@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { calculateAdaptiveChunkSize, estimateAvgCueTokens } from '../chunking/adaptive-chunk-calculator.js'
+import { calculateAdaptiveChunkSize, calculateAdaptiveChunkBudget, estimateAvgCueTokens } from '../chunking/adaptive-chunk-calculator.js'
 import type { SubtitleDocument } from '@srtora/types'
 
 describe('calculateAdaptiveChunkSize', () => {
@@ -15,7 +15,7 @@ describe('calculateAdaptiveChunkSize', () => {
   it('returns a valid chunk size with unknown context window', () => {
     const result = calculateAdaptiveChunkSize(baseParams)
     expect(result).toBeGreaterThanOrEqual(4)
-    expect(result).toBeLessThanOrEqual(50) // default max (no totalCues)
+    expect(result).toBeLessThanOrEqual(100) // default max (no totalCues)
   })
 
   it('returns larger chunk size with large context window', () => {
@@ -29,8 +29,8 @@ describe('calculateAdaptiveChunkSize', () => {
       ...baseParams,
       contextWindow: 1048576,
     })
-    // Default max is 50 when totalCues not provided
-    expect(result).toBe(50)
+    // Default max is 100 when totalCues not provided
+    expect(result).toBe(100)
   })
 
   it('returns minimum chunk size for tiny context windows', () => {
@@ -117,22 +117,22 @@ describe('calculateAdaptiveChunkSize', () => {
     expect(result).toBeGreaterThanOrEqual(4) // clamped to min
   })
 
-  it('dynamic max is 75 for 100+ cue documents', () => {
+  it('dynamic max is 200 for 100+ cue documents', () => {
     const result = calculateAdaptiveChunkSize({
       ...baseParams,
       contextWindow: 1048576,
       totalCues: 150,
     })
-    expect(result).toBe(75)
+    expect(result).toBe(200)
   })
 
-  it('dynamic max is 100 for 500+ cue documents', () => {
+  it('dynamic max is 300 for 500+ cue documents', () => {
     const result = calculateAdaptiveChunkSize({
       ...baseParams,
       contextWindow: 1048576,
       totalCues: 600,
     })
-    expect(result).toBe(100)
+    expect(result).toBe(300)
   })
 
   it('null maxOutputTokens does not constrain', () => {
@@ -220,5 +220,93 @@ describe('estimateAvgCueTokens', () => {
     expect(estimateAvgCueTokens(doc)).toBe(5)
     // Same without language
     expect(estimateAvgCueTokens(doc, undefined)).toBe(5)
+  })
+})
+
+describe('calculateAdaptiveChunkBudget', () => {
+  const baseParams = {
+    contextWindow: null as number | null,
+    avgCueTokens: 20,
+    lookbehind: 3,
+    lookahead: 3,
+    contextUsageTarget: 0.6,
+    outputStrategy: 'structured' as const,
+  }
+
+  it('returns a token budget, max cue count, and avg cue tokens', () => {
+    const result = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 128_000,
+    })
+    expect(result).toHaveProperty('targetTokenBudget')
+    expect(result).toHaveProperty('maxCueCount')
+    expect(result).toHaveProperty('avgCueTokens')
+    expect(result.targetTokenBudget).toBeGreaterThan(0)
+    expect(result.maxCueCount).toBeGreaterThan(0)
+    expect(result.avgCueTokens).toBe(20)
+  })
+
+  it('larger context windows produce larger token budgets', () => {
+    const small = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 4_096,
+    })
+    const large = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 128_000,
+    })
+    expect(large.targetTokenBudget).toBeGreaterThan(small.targetTokenBudget)
+  })
+
+  it('maxOutputTokens constrains the budget', () => {
+    const unconstrained = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 1_000_000,
+    })
+    const constrained = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 1_000_000,
+      maxOutputTokens: 4_096,
+      outputStabilityThreshold: 0.85,
+    })
+    // maxOutputTokens * 0.85 = 3481, which should limit the budget
+    expect(constrained.targetTokenBudget).toBeLessThanOrEqual(4_096 * 0.85)
+    expect(constrained.targetTokenBudget).toBeLessThan(unconstrained.targetTokenBudget)
+  })
+
+  it('safeInputBudget overrides contextWindow calculation', () => {
+    const result = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 1_000_000, // huge, but overridden
+      safeInputBudget: 10_000,
+    })
+    // Budget should be derived from 10K, not 1M
+    // 10K - overhead (400+200+100+120) = 9180, × 0.5 = 4590
+    expect(result.targetTokenBudget).toBeLessThan(10_000)
+  })
+
+  it('hardChunkCeiling limits maxCueCount', () => {
+    const normal = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 128_000,
+      totalCues: 600,
+    })
+    const ceilinged = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 128_000,
+      totalCues: 600,
+      hardChunkCeiling: 50,
+    })
+    expect(normal.maxCueCount).toBe(300) // 500+ → 300
+    expect(ceilinged.maxCueCount).toBe(50)
+  })
+
+  it('ensures minimum token budget for very small contexts', () => {
+    const result = calculateAdaptiveChunkBudget({
+      ...baseParams,
+      contextWindow: 100, // extremely small
+    })
+    // Should still have a viable budget (MIN_CHUNK_SIZE * avgCueTokens = 4 * 20 = 80)
+    expect(result.targetTokenBudget).toBeGreaterThanOrEqual(80)
   })
 })

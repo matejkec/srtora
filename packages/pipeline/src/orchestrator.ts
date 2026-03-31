@@ -6,9 +6,6 @@ import type {
   TranslationResult,
   TranslatedItem,
   ReviewResult,
-  OutputStrategyType,
-  ModelCapabilities,
-  CorrectionEntry,
 } from '@srtora/types'
 import {
   PipelineException,
@@ -17,49 +14,31 @@ import {
 import {
   parse,
   buildChunks,
+  buildChunksTokenBudget,
   mergeChunkResults,
   assemble,
   assembleBilingual,
   validateOutput,
-  calculateAdaptiveChunkSize,
+  calculateAdaptiveChunkBudget,
   estimateAvgCueTokens,
 } from '@srtora/core'
 import type { TranslationChunk } from '@srtora/core'
-import type { LLMAdapter, ChatRequest, ChatResponse } from '@srtora/adapters'
-import {
-  createAdapter,
-  withRetry,
-  parseJsonSafe,
-  buildTranslateGemmaPrompt,
-  resolveCapabilities,
-  prepareRequest,
-  isStructuredOutputError,
-} from '@srtora/adapters'
+import type { LLMAdapter, ChatResponse } from '@srtora/adapters'
+import { createAdapter, withRetry, parseJsonSafe, buildTranslateGemmaPrompt } from '@srtora/adapters'
 import {
   buildAnalysisPrompt,
   buildTranslationPrompt,
   buildReviewPrompt,
   flagTranslations,
-  DefaultStrategy,
-  GemmaStrategy,
+  createPromptStrategy,
   translationOutputSchema,
   analysisOutputSchema,
   reviewOutputSchema,
-  estimatePromptOverhead,
 } from '@srtora/prompts'
 import type { PromptStrategy } from '@srtora/prompts'
 import { ProgressTracker } from './progress-tracker.js'
-import { QUALITY_MODES } from './quality-modes.js'
-import { mergeMemoryIntoSession, getRelevantCorrections } from './memory-injector.js'
-
-/**
- * Returns true if the model name refers to a TranslateGemma model.
- * Covers all realistic naming variants by stripping separators before matching.
- */
-export function isTranslateGemmaModel(modelName: string): boolean {
-  const normalized = modelName.toLowerCase().replace(/[-_/]/g, '')
-  return normalized.includes('translate') && normalized.includes('gemma')
-}
+import { resolveExecutionParams } from './profile-resolver.js'
+import type { ResolvedExecutionParams } from './profile-resolver.js'
 
 export interface PipelineCallbacks {
   onProgress: (event: ProgressEvent) => void
@@ -67,36 +46,12 @@ export interface PipelineCallbacks {
 
 export class PipelineOrchestrator {
   private config: PipelineConfig
+  private params: ResolvedExecutionParams
   private adapter: LLMAdapter
+  private analysisAdapter: LLMAdapter
+  private reviewAdapter: LLMAdapter
   private strategy: PromptStrategy
   private signal?: AbortSignal
-
-  /** Effective output strategy (resolved from capabilities or config override) */
-  private outputStrategy: OutputStrategyType = 'prompted'
-  /** Resolved model capabilities */
-  private modelCaps: ModelCapabilities | null = null
-  /** Effective chunk size (may be computed adaptively) */
-  private effectiveChunkSize: number
-  /** Number of review passes */
-  private reviewPasses: number
-  /** Effective lookbehind */
-  private effectiveLookbehind: number
-  /** Effective lookahead */
-  private effectiveLookahead: number
-  /** Effective max retries */
-  private effectiveMaxRetries: number
-  /** Quality mode context usage target */
-  private contextUsageTarget: number
-
-  /** Cumulative parse failure count — triggers chunk size reduction after threshold */
-  private parseFailureCount = 0
-  /** Parse failure threshold before reducing chunk size */
-  private static readonly PARSE_FAILURE_THRESHOLD = 3
-  /** Chunk size reduction factor after hitting parse failure threshold */
-  private static readonly CHUNK_SIZE_REDUCTION = 0.7
-
-  /** Reasonable max tokens to prevent truncation on servers with low defaults (e.g. MLX 256) */
-  private static readonly MAX_COMPLETION_TOKENS = 4096
 
   constructor(
     config: PipelineConfig,
@@ -105,52 +60,30 @@ export class PipelineOrchestrator {
     this.config = config
     this.signal = options?.signal
 
-    // Resolve quality mode
-    const mode = config.qualityMode ? QUALITY_MODES[config.qualityMode] : undefined
+    // Resolve all execution parameters from model registry + quality mode + config
+    this.params = resolveExecutionParams(
+      config.translationModel,
+      config.provider.type,
+      config,
+      config.ollamaFamily,
+    )
 
-    // Apply quality mode defaults, with explicit config overrides
-    const enableAnalysis = config.enableAnalysis ?? mode?.enableAnalysis ?? true
-    const enableReview = config.enableReview ?? mode?.enableReview ?? true
-    this.reviewPasses = config.reviewPasses ?? mode?.reviewPasses ?? 1
-    this.effectiveChunkSize = config.chunkSize ?? mode?.fixedChunkSize ?? 15
-    this.effectiveLookbehind = config.lookbehind ?? mode?.lookbehind ?? 3
-    this.effectiveLookahead = config.lookahead ?? mode?.lookahead ?? 3
-    this.effectiveMaxRetries = config.maxRetries ?? mode?.maxRetries ?? 2
-    this.contextUsageTarget = mode?.contextUsageTarget ?? 0.6
-
-    // TranslateGemma is a specialized model — disable analysis/review
-    if (this.isTranslateGemma()) {
+    // Translation-only models (e.g., TranslateGemma) — force-disable analysis/review
+    if (this.params.translationOnly) {
       this.config = { ...this.config, enableAnalysis: false, enableReview: false }
-      this.reviewPasses = 0
-    } else {
-      this.config = { ...this.config, enableAnalysis, enableReview }
     }
 
-    // Auto-detect prompt strategy based on model family
+    // Use resolved prompt strategy, or explicit override
     if (options?.strategy) {
       this.strategy = options.strategy
     } else {
-      const modelLower = config.translationModel.toLowerCase()
-      this.strategy = modelLower.includes('gemma')
-        ? new GemmaStrategy()
-        : new DefaultStrategy()
+      this.strategy = createPromptStrategy(this.params.promptStyleId)
     }
 
-    // Create adapter
+    // Create adapters — analysis/review may use different models but same provider
     this.adapter = createAdapter(config.provider)
-
-    // Resolve model capabilities and output strategy
-    const resolved = resolveCapabilities(
-      config.translationModel,
-      config.provider.type,
-    )
-    this.modelCaps = resolved.capabilities
-    this.outputStrategy = config.outputStrategy ?? resolved.outputStrategy
-
-    // Override prompt strategy based on capabilities
-    if (this.modelCaps && !this.modelCaps.supportsSystemRole && !options?.strategy) {
-      this.strategy = new GemmaStrategy()
-    }
+    this.analysisAdapter = this.adapter
+    this.reviewAdapter = this.adapter
   }
 
   async run(
@@ -164,11 +97,11 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
-    // TranslateGemma requires a real ISO 639-1 source language code — it cannot auto-detect
-    if (this.isTranslateGemma() && this.config.sourceLanguage === 'auto') {
+    // Translation-only models require explicit source language
+    if (this.params.translationOnly && this.config.sourceLanguage === 'auto') {
       throw new PipelineException({
         code: 'VALIDATION_ERROR',
-        message: 'TranslateGemma requires an explicit source language — Auto-detect is not supported.',
+        message: 'This translation model requires an explicit source language — Auto-detect is not supported.',
         recoverable: false,
         suggestion: 'Select a specific source language (e.g. English) in the language selector.',
       })
@@ -195,47 +128,10 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
-    // === Merge translation memory ===
-    const languagePair = `${this.config.sourceLanguage}->${this.config.targetLanguage}`
-    let corrections: CorrectionEntry[] = []
-    let initialSessionMemory: SessionMemory | undefined
-
-    if (this.config.translationMemory) {
-      initialSessionMemory = mergeMemoryIntoSession(
-        this.config.translationMemory,
-        undefined,
-        languagePair,
-      )
-      corrections = getRelevantCorrections(this.config.translationMemory, languagePair)
-    }
-
-    // === Adaptive chunk sizing ===
-    const qualityMode = this.config.qualityMode ? QUALITY_MODES[this.config.qualityMode] : undefined
-    if (qualityMode?.chunkSizingStrategy === 'adaptive' || (!this.config.chunkSize && this.modelCaps)) {
-      const avgCueTokens = estimateAvgCueTokens(document, this.config.sourceLanguage)
-      const promptOverhead = estimatePromptOverhead({
-        speakerCount: initialSessionMemory?.speakers.length ?? 0,
-        termCount: initialSessionMemory?.terms.length ?? 0,
-        correctionCount: corrections.length,
-        hasTonePreference: !!this.config.tonePreference,
-      })
-      this.effectiveChunkSize = calculateAdaptiveChunkSize({
-        contextWindow: this.modelCaps?.contextWindow ?? null,
-        avgCueTokens,
-        lookbehind: this.effectiveLookbehind,
-        lookahead: this.effectiveLookahead,
-        contextUsageTarget: this.contextUsageTarget,
-        outputStrategy: this.outputStrategy,
-        systemPromptOverhead: promptOverhead,
-        maxOutputTokens: this.modelCaps?.maxOutputTokens ?? null,
-        totalCues: document.cues.length,
-      })
-    }
-
     // === Phase 1: Analyze (optional) ===
-    let sessionMemory: SessionMemory | undefined = initialSessionMemory
+    let sessionMemory: SessionMemory | undefined
 
-    if (this.config.enableAnalysis) {
+    if (this.params.enableAnalysis) {
       tracker.emit('analyzing', { message: 'Analyzing content...' })
       const analyzeStart = Date.now()
 
@@ -254,31 +150,23 @@ export class PipelineOrchestrator {
       const model = this.config.analysisModel || this.config.translationModel
 
       try {
-        const response = await this.chatWithFallback(
-          {
-            model,
-            messages,
-            jsonSchema: analysisOutputSchema,
-            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-            signal: this.signal,
-          },
-          tracker,
+        const response = await withRetry(
+          () =>
+            this.analysisAdapter.chat({
+              model,
+              messages,
+              jsonSchema: analysisOutputSchema,
+              maxTokens: this.params.maxCompletionTokens,
+              signal: this.signal,
+            }),
+          { maxRetries: this.params.maxRetries, signal: this.signal },
         )
 
         const parsed = parseJsonSafe(response.content)
         if (parsed) {
           const validated = SessionMemorySchema.safeParse(parsed.data)
           if (validated.success) {
-            // Merge analysis results with translation memory
-            if (this.config.translationMemory && initialSessionMemory) {
-              sessionMemory = mergeMemoryIntoSession(
-                this.config.translationMemory,
-                validated.data,
-                languagePair,
-              )
-            } else {
-              sessionMemory = validated.data
-            }
+            sessionMemory = validated.data
           } else {
             tracker.addWarnings(1)
           }
@@ -306,16 +194,13 @@ export class PipelineOrchestrator {
     tracker.emit('translating', { message: 'Translating...' })
     const translateStart = Date.now()
 
-    const chunks = buildChunks(document, {
-      chunkSize: this.effectiveChunkSize,
-      lookbehind: this.effectiveLookbehind,
-      lookahead: this.effectiveLookahead,
-    })
+    // Build chunks using token-budget-first strategy
+    const chunks = this.buildTranslationChunks(document)
 
     const chunkResults: { chunkId: string; items: TranslatedItem[]; warnings: string[]; repairCount: number }[] = []
     const allTranslations = new Map<number, string>()
 
-    const useTranslateGemma = this.isTranslateGemma()
+    const useTranslateGemma = this.params.translationOnly && this.params.promptStyleId === 'raw-completion'
 
     for (let i = 0; i < chunks.length; i++) {
       this.checkCancelled()
@@ -338,31 +223,49 @@ export class PipelineOrchestrator {
         // TranslateGemma: per-cue translation with specialized content format
         items = await this.translateChunkWithTranslateGemma(chunk)
       } else {
-        // Standard path: batch translation with output strategy
+        // Standard path: batch translation with JSON schema
+        const effectiveMemory = this.filterSessionMemory(sessionMemory)
         const { system, user } = buildTranslationPrompt({
           targetCues: chunk.targetCues,
           contextBefore: chunk.contextBefore,
           contextAfter: chunk.contextAfter,
           previousTranslations: allTranslations,
-          sessionMemory,
+          sessionMemory: effectiveMemory,
           sourceLanguage: this.config.sourceLanguage,
           targetLanguage: this.config.targetLanguage,
           tonePreference: this.config.tonePreference,
-          corrections: corrections.length > 0 ? corrections : undefined,
         })
 
         const messages = this.strategy.formatMessages(system, user)
 
-        const response = await this.translateChunkProgressive(
-          chunk,
-          messages,
-          sessionMemory,
-          tracker,
+        const response = await withRetry(
+          async () => {
+            const resp = await this.adapter.chat({
+              model: this.config.translationModel,
+              messages,
+              jsonSchema: translationOutputSchema,
+              maxTokens: this.params.maxCompletionTokens,
+              signal: this.signal,
+            })
+
+            const parsed = this.parseTranslationResponse(resp, chunk)
+            if (!parsed) {
+              throw new PipelineException({
+                code: 'STRUCTURED_OUTPUT_FAIL',
+                message: `Failed to parse translation response for ${chunk.chunkId}`,
+                phase: 'translating',
+                chunkId: chunk.chunkId,
+                recoverable: true,
+              })
+            }
+            return parsed
+          },
+          { maxRetries: this.params.maxRetries, signal: this.signal },
         )
 
         items = response.items
         repairCount = response.repaired ? 1 : 0
-        totalRetries += response.retryCount
+        if (repairCount) totalRetries++
       }
 
       // Validate: check all target cues got translations
@@ -397,40 +300,30 @@ export class PipelineOrchestrator {
 
     this.checkCancelled()
 
-    // === Phase 3: Review (optional, multi-pass) ===
-    if (this.config.enableReview && this.reviewPasses > 0) {
+    // === Phase 3: Review (optional) ===
+    if (this.params.enableReview && this.params.reviewDepth !== 'none') {
       tracker.emit('reviewing', { message: 'Reviewing translations...' })
       const reviewStart = Date.now()
 
-      for (let pass = 0; pass < this.reviewPasses; pass++) {
-        this.checkCancelled()
+      const reviewMemory = this.filterSessionMemory(sessionMemory)
 
-        const flags = flagTranslations({
-          cues: document.cues,
-          translations: allTranslations,
-          sessionMemory,
-        })
+      const flags = flagTranslations({
+        cues: document.cues,
+        translations: allTranslations,
+        sessionMemory: reviewMemory,
+      })
 
-        if (flags.length === 0) {
-          tracker.emit('reviewing', {
-            phaseProgress: 0.9,
-            message: pass === 0
-              ? 'No issues found during review'
-              : `Review pass ${pass + 1}: no further issues found`,
-          })
-          break
-        }
-
+      if (flags.length > 0) {
         tracker.emit('reviewing', {
-          phaseProgress: (pass + 0.3) / this.reviewPasses,
-          message: `Review pass ${pass + 1}/${this.reviewPasses}: found ${flags.length} issues...`,
+          phaseProgress: 0.3,
+          message: `Found ${flags.length} issues, requesting corrections...`,
         })
 
         const { system, user } = buildReviewPrompt({
           flags,
           allCues: document.cues,
           translations: allTranslations,
-          sessionMemory,
+          sessionMemory: reviewMemory,
           sourceLanguage: this.config.sourceLanguage,
           targetLanguage: this.config.targetLanguage,
         })
@@ -440,38 +333,37 @@ export class PipelineOrchestrator {
 
         try {
           const response = await withRetry(
-            () => this.chatWithFallback(
-              {
+            () =>
+              this.reviewAdapter.chat({
                 model,
                 messages,
                 jsonSchema: reviewOutputSchema,
-                maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+                maxTokens: this.params.maxCompletionTokens,
                 signal: this.signal,
-              },
-              tracker,
-            ),
-            { maxRetries: this.effectiveMaxRetries, signal: this.signal },
+              }),
+            { maxRetries: this.params.maxRetries, signal: this.signal },
           )
 
           const parsed = parseJsonSafe<ReviewResult>(response.content)
-          if (parsed?.data?.corrections && parsed.data.corrections.length > 0) {
+          if (parsed?.data?.corrections) {
             for (const correction of parsed.data.corrections) {
               allTranslations.set(correction.id, correction.text)
             }
             tracker.emit('reviewing', {
-              phaseProgress: (pass + 0.9) / this.reviewPasses,
-              message: `Pass ${pass + 1}: applied ${parsed.data.corrections.length} corrections`,
+              phaseProgress: 0.9,
+              message: `Applied ${parsed.data.corrections.length} corrections`,
             })
-          } else {
-            // No corrections returned — stop early
-            break
           }
         } catch (error) {
           // Review is optional — log warning and continue
           if (error instanceof PipelineException && error.error.code === 'CANCELLED') throw error
           tracker.addWarnings(1)
-          break
         }
+      } else {
+        tracker.emit('reviewing', {
+          phaseProgress: 0.9,
+          message: 'No issues found during review',
+        })
       }
 
       phaseDurations.reviewing = Date.now() - reviewStart
@@ -515,7 +407,6 @@ export class PipelineOrchestrator {
       ...validation.issues,
     ]
 
-    // Extract memory updates if translation memory is active
     const result: TranslationResult = {
       document,
       sessionMemory,
@@ -537,30 +428,47 @@ export class PipelineOrchestrator {
   }
 
   /**
-   * Send a chat request with automatic fallback from structured to prompted mode.
+   * Build translation chunks using token-budget-first strategy.
    *
-   * If the model returns a 400 error indicating JSON mode isn't supported,
-   * automatically retry with prompted mode (JSON instructions in the prompt text).
+   * If idealChunkTarget is set on the profile, falls back to fixed cue-count chunking.
+   * Otherwise, calculates a token budget and builds variable-size chunks where
+   * short cues produce larger chunks and long cues produce smaller chunks.
    */
-  private async chatWithFallback(
-    request: ChatRequest,
-    tracker: ProgressTracker,
-  ): Promise<ChatResponse> {
-    const prepared = prepareRequest(request, this.outputStrategy)
-
-    try {
-      return await this.adapter.chat(prepared)
-    } catch (error) {
-      // If structured output fails, downgrade to prompted mode and retry
-      if (this.outputStrategy === 'structured' && isStructuredOutputError(error)) {
-        this.outputStrategy = 'prompted'
-        tracker.addWarnings(1)
-
-        const fallback = prepareRequest(request, 'prompted')
-        return await this.adapter.chat(fallback)
-      }
-      throw error
+  private buildTranslationChunks(document: SubtitleDocument): TranslationChunk[] {
+    // If the profile specifies an ideal chunk target, use fixed cue-count chunking
+    if (this.params.idealChunkTarget != null) {
+      return buildChunks(document, {
+        chunkSize: this.params.idealChunkTarget,
+        lookbehind: this.params.lookbehind,
+        lookahead: this.params.lookahead,
+      })
     }
+
+    // Token-budget-first: calculate budget, then build variable-size chunks
+    const avgCueTokens = estimateAvgCueTokens(document, this.config.sourceLanguage)
+    const outputStrategy = this.params.structuredOutputMethod === 'none' ? 'raw' as const : 'structured' as const
+
+    const budget = calculateAdaptiveChunkBudget({
+      contextWindow: this.params.contextWindow,
+      avgCueTokens,
+      lookbehind: this.params.lookbehind,
+      lookahead: this.params.lookahead,
+      contextUsageTarget: this.params.effectiveContextUsageTarget,
+      outputStrategy,
+      maxOutputTokens: this.params.maxCompletionTokens,
+      totalCues: document.cues.length,
+      safeInputBudget: this.params.safeInputBudget,
+      hardChunkCeiling: this.params.hardChunkCeiling,
+      outputStabilityThreshold: this.params.outputStabilityThreshold,
+    })
+
+    return buildChunksTokenBudget(document, {
+      targetTokenBudget: budget.targetTokenBudget,
+      maxCueCount: budget.maxCueCount,
+      sourceLanguage: this.config.sourceLanguage,
+      lookbehind: this.params.lookbehind,
+      lookahead: this.params.lookahead,
+    })
   }
 
   private parseTranslationResponse(
@@ -589,237 +497,19 @@ export class PipelineOrchestrator {
     )
 
     // If the response was truncated but we recovered some items, use them
+    // rather than retrying and getting the same truncation
     if (items.length === 0) return null
 
     return { items, repaired: parsed.repaired || response.finishReason === 'length' }
   }
 
   /**
-   * Progressive retry strategy for translation chunks.
-   *
-   * Tier 1: Standard request
-   * Tier 2: Same request with temperature 0.3 (introduce variation)
-   * Tier 3: Simplified prompt (strip corrections, halve context) with temperature 0.5
-   * Tier 4: Split chunk in half, translate each independently
-   * Final fallback: Use source text (never crash)
-   */
-  private async translateChunkProgressive(
-    chunk: TranslationChunk,
-    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    sessionMemory: SessionMemory | undefined,
-    tracker: ProgressTracker,
-  ): Promise<{ items: TranslatedItem[]; repaired: boolean; retryCount: number }> {
-    let retryCount = 0
-
-    // Tier 1: Standard request
-    {
-      this.checkCancelled()
-      const resp = await this.chatWithFallback(
-        {
-          model: this.config.translationModel,
-          messages,
-          jsonSchema: translationOutputSchema,
-          maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-          signal: this.signal,
-        },
-        tracker,
-      )
-      const parsed = this.parseTranslationResponse(resp, chunk)
-      if (parsed) return { ...parsed, retryCount }
-    }
-
-    // Parse failed — track it
-    this.trackParseFailure(tracker)
-    retryCount++
-
-    // Tier 2: Same request with temperature 0.3
-    {
-      this.checkCancelled()
-      try {
-        const resp = await this.chatWithFallback(
-          {
-            model: this.config.translationModel,
-            messages,
-            jsonSchema: translationOutputSchema,
-            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-            temperature: 0.3,
-            signal: this.signal,
-          },
-          tracker,
-        )
-        const parsed = this.parseTranslationResponse(resp, chunk)
-        if (parsed) return { ...parsed, retryCount }
-      } catch {
-        // Continue to next tier
-      }
-    }
-
-    this.trackParseFailure(tracker)
-    retryCount++
-
-    // Tier 3: Simplified prompt — strip corrections, halve context, temperature 0.5
-    if (this.effectiveMaxRetries >= 2) {
-      this.checkCancelled()
-      try {
-        const reducedMessages = this.buildReducedMessages(chunk, sessionMemory)
-        const resp = await this.chatWithFallback(
-          {
-            model: this.config.translationModel,
-            messages: reducedMessages,
-            jsonSchema: translationOutputSchema,
-            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-            temperature: 0.5,
-            signal: this.signal,
-          },
-          tracker,
-        )
-        const parsed = this.parseTranslationResponse(resp, chunk)
-        if (parsed) return { ...parsed, retryCount }
-      } catch {
-        // Continue to next tier
-      }
-
-      this.trackParseFailure(tracker)
-      retryCount++
-    }
-
-    // Tier 4: Split chunk in half and translate each half independently
-    if (chunk.targetCues.length > 1) {
-      this.checkCancelled()
-      try {
-        const items = await this.splitAndRetryChunk(chunk, sessionMemory, tracker)
-        return { items, repaired: true, retryCount }
-      } catch {
-        // Fall through to source text fallback
-      }
-    }
-
-    // Final fallback: use source text (never crash)
-    tracker.addWarnings(1)
-    const items = chunk.targetCues.map((cue) => ({
-      id: cue.sequence,
-      text: cue.rawText,
-    }))
-    return { items, repaired: false, retryCount }
-  }
-
-  /**
-   * Build a simplified prompt for retry tier 3:
-   * - Strip corrections
-   * - Halve context cues
-   */
-  private buildReducedMessages(
-    chunk: TranslationChunk,
-    sessionMemory: SessionMemory | undefined,
-  ): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
-    const halvedBefore = chunk.contextBefore.slice(
-      Math.floor(chunk.contextBefore.length / 2),
-    )
-    const halvedAfter = chunk.contextAfter.slice(
-      0,
-      Math.ceil(chunk.contextAfter.length / 2),
-    )
-
-    const { system, user } = buildTranslationPrompt({
-      targetCues: chunk.targetCues,
-      contextBefore: halvedBefore,
-      contextAfter: halvedAfter,
-      sessionMemory,
-      sourceLanguage: this.config.sourceLanguage,
-      targetLanguage: this.config.targetLanguage,
-      tonePreference: this.config.tonePreference,
-      // No corrections — stripped for simplicity
-    })
-
-    return this.strategy.formatMessages(system, user)
-  }
-
-  /**
-   * Split a chunk in half and translate each half with a single attempt.
-   * If a half fails to parse, use source text for those cues.
-   */
-  private async splitAndRetryChunk(
-    chunk: TranslationChunk,
-    sessionMemory: SessionMemory | undefined,
-    tracker: ProgressTracker,
-  ): Promise<TranslatedItem[]> {
-    const mid = Math.ceil(chunk.targetCues.length / 2)
-    const halves = [
-      chunk.targetCues.slice(0, mid),
-      chunk.targetCues.slice(mid),
-    ]
-
-    const allItems: TranslatedItem[] = []
-
-    for (const halfCues of halves) {
-      if (halfCues.length === 0) continue
-      this.checkCancelled()
-
-      const { system, user } = buildTranslationPrompt({
-        targetCues: halfCues,
-        contextBefore: chunk.contextBefore,
-        contextAfter: chunk.contextAfter,
-        sessionMemory,
-        sourceLanguage: this.config.sourceLanguage,
-        targetLanguage: this.config.targetLanguage,
-        tonePreference: this.config.tonePreference,
-      })
-
-      const messages = this.strategy.formatMessages(system, user)
-
-      try {
-        const resp = await this.chatWithFallback(
-          {
-            model: this.config.translationModel,
-            messages,
-            jsonSchema: translationOutputSchema,
-            maxTokens: PipelineOrchestrator.MAX_COMPLETION_TOKENS,
-            signal: this.signal,
-          },
-          tracker,
-        )
-        const parsed = this.parseTranslationResponse(resp, chunk)
-        if (parsed) {
-          allItems.push(...parsed.items)
-          continue
-        }
-      } catch {
-        // Fall through to source text
-      }
-
-      // Half failed — use source text for these cues
-      tracker.addWarnings(1)
-      for (const cue of halfCues) {
-        allItems.push({ id: cue.sequence, text: cue.rawText })
-      }
-    }
-
-    return allItems
-  }
-
-  /**
-   * Track a parse failure and auto-reduce chunk size after hitting threshold.
-   */
-  private trackParseFailure(tracker: ProgressTracker) {
-    this.parseFailureCount++
-    if (
-      this.parseFailureCount >= PipelineOrchestrator.PARSE_FAILURE_THRESHOLD &&
-      this.parseFailureCount % PipelineOrchestrator.PARSE_FAILURE_THRESHOLD === 0
-    ) {
-      const newSize = Math.max(4, Math.floor(this.effectiveChunkSize * PipelineOrchestrator.CHUNK_SIZE_REDUCTION))
-      if (newSize < this.effectiveChunkSize) {
-        this.effectiveChunkSize = newSize
-        tracker.addWarnings(1)
-      }
-    }
-  }
-
-  private isTranslateGemma(): boolean {
-    return isTranslateGemmaModel(this.config.translationModel)
-  }
-
-  /**
    * Translate a chunk using TranslateGemma's pre-formatted prompt + /v1/completions.
+   *
+   * The MLX-LM server strips content arrays to plain strings before the Jinja
+   * template runs, so /v1/chat/completions cannot work with TranslateGemma.
+   * Instead we replicate the Jinja template in TypeScript and call /v1/completions.
+   * Sends one request per cue since TranslateGemma accepts exactly one text item.
    */
   private async translateChunkWithTranslateGemma(
     chunk: TranslationChunk,
@@ -840,14 +530,14 @@ export class PipelineOrchestrator {
           this.adapter.complete(
             this.config.translationModel,
             prompt,
-            PipelineOrchestrator.MAX_COMPLETION_TOKENS,
+            this.params.maxCompletionTokens,
             ['<end_of_turn>'],
             this.signal,
           ),
-        { maxRetries: this.effectiveMaxRetries, signal: this.signal },
+        { maxRetries: this.params.maxRetries, signal: this.signal },
       )
 
-      // Strip any special tokens that leaked through
+      // Strip any special tokens that leaked through (e.g. <end_of_turn> repeated on bad stop)
       const translated = translatedText
         .replace(/<end_of_turn>[\s\S]*/g, '')
         .replace(/<start_of_turn>[\s\S]*/g, '')
@@ -868,6 +558,19 @@ export class PipelineOrchestrator {
     }
 
     return items
+  }
+
+  /**
+   * Filter session memory based on the model's memoryInjection strategy.
+   * 'full' = pass through, 'terms-only' = strip speakers, 'none' = undefined.
+   */
+  private filterSessionMemory(memory: SessionMemory | undefined): SessionMemory | undefined {
+    if (!memory) return undefined
+    switch (this.params.memoryInjection) {
+      case 'none': return undefined
+      case 'terms-only': return { speakers: [], terms: memory.terms, warnings: [] }
+      case 'full': return memory
+    }
   }
 
   private checkCancelled() {

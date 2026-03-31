@@ -1,28 +1,32 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useTranslationStore } from '@/stores/translation-store'
 import { SOURCE_LANGUAGES, TARGET_LANGUAGES } from '@/lib/languages'
-import { isTranslateGemmaModel } from '@srtora/pipeline'
+import { getRegistryEntry } from '@srtora/adapters'
 import { ArrowRight } from 'lucide-react'
 
 export function LanguageSelector() {
-  const { sourceLanguage, targetLanguage, setSourceLanguage, setTargetLanguage, file, selectedModel } =
+  const { sourceLanguage, targetLanguage, setSourceLanguage, setTargetLanguage, file, selectedModel, provider } =
     useTranslationStore()
 
-  const isTranslateGemma = selectedModel ? isTranslateGemmaModel(selectedModel) : false
+  const isTranslationOnly = useMemo(() => {
+    if (!selectedModel || !provider) return false
+    const entry = getRegistryEntry(selectedModel, provider.type)
+    return entry?.executionProfile.translationOnly ?? false
+  }, [selectedModel, provider])
 
-  // When a TranslateGemma model is selected, 'auto' is invalid — reset to English
+  // When a translation-only model is selected, 'auto' is invalid — reset to English
   useEffect(() => {
-    if (isTranslateGemma && sourceLanguage === 'auto') {
+    if (isTranslationOnly && sourceLanguage === 'auto') {
       setSourceLanguage('en')
     }
-  }, [isTranslateGemma, sourceLanguage, setSourceLanguage])
+  }, [isTranslationOnly, sourceLanguage, setSourceLanguage])
 
   if (!file) return null
 
-  // TranslateGemma cannot auto-detect — exclude that option
-  const availableSourceLanguages = isTranslateGemma
+  // Translation-only models cannot auto-detect — exclude that option
+  const availableSourceLanguages = isTranslationOnly
     ? SOURCE_LANGUAGES.filter((l) => l.code !== 'auto')
     : SOURCE_LANGUAGES
 
@@ -62,9 +66,9 @@ export function LanguageSelector() {
         </div>
       </div>
 
-      {isTranslateGemma && (
+      {isTranslationOnly && (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          TranslateGemma requires an explicit source language — Auto-detect is not supported.
+          This model requires an explicit source language — Auto-detect is not supported.
         </p>
       )}
     </div>
