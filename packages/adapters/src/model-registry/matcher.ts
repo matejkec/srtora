@@ -134,6 +134,32 @@ function findBestSizeMatch(
 }
 
 /**
+ * Build a display name for a matched model, appending a disambiguator when
+ * multiple detected models map to the same registry entry (e.g., different
+ * quantizations of the same base model).
+ *
+ * "Gemma 3 12B" + "mlx-community/gemma-3-12b-it-4bit" → "Gemma 3 12B (4bit)"
+ * "TranslateGemma 4B" + "translategemma:4b"             → "TranslateGemma 4B" (exact, no suffix)
+ */
+function buildMatchedDisplayName(registryDisplayName: string, detectedId: string, registryId: string): string {
+  const normalized = normalizeModelId(detectedId)
+  const registryNorm = registryId.toLowerCase()
+
+  // Exact match → no disambiguation needed
+  if (normalized === registryNorm || detectedId === registryId) {
+    return registryDisplayName
+  }
+
+  // Extract quantization suffix (e.g., "4bit", "8bit", "q4_0", "q8_0", "fp16")
+  const quantMatch = normalized.match(/(?:^|[\-_])(\d+bit|q\d+(?:_\w+)?|fp\d+|gguf)(?:[\-_]|$)/i)
+  if (quantMatch) {
+    return `${registryDisplayName} (${quantMatch[1]})`
+  }
+
+  return registryDisplayName
+}
+
+/**
  * Annotate a list of detected models (from adapter.listModels()) against the registry.
  */
 export interface AnnotatedModel {
@@ -157,7 +183,7 @@ export function annotateDetectedModels(
         registryEntry: match.entry,
         tier: match.tier,
         matchType: match.matchType,
-        displayName: match.entry.displayName,
+        displayName: buildMatchedDisplayName(match.entry.displayName, model.id, match.entry.id),
       }
     }
 

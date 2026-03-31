@@ -1080,6 +1080,39 @@ describe('matchDetectedModels', () => {
     expect(annotated[3]!.tier).toBe('experimental')
     expect(annotated[3]!.registryEntry).toBeNull()
   })
+
+  it('disambiguates quantization variants mapping to the same registry entry', () => {
+    const detected: ModelInfo[] = [
+      { id: 'mlx-community/gemma-3-12b-it-4bit', name: 'gemma-3-12b-it-4bit', providerId: 'openai-compatible', supportsStructuredOutput: true, supportsStreaming: true },
+      { id: 'mlx-community/gemma-3-12b-it-8bit', name: 'gemma-3-12b-it-8bit', providerId: 'openai-compatible', supportsStructuredOutput: true, supportsStreaming: true },
+    ]
+    const annotated = matchDetectedModels(detected, 'openai-compatible')
+    expect(annotated).toHaveLength(2)
+
+    expect(annotated[0]!.registryEntry!.id).toBe('gemma3:12b')
+    expect(annotated[0]!.displayName).toBe('Gemma 3 12B (4bit)')
+
+    expect(annotated[1]!.registryEntry!.id).toBe('gemma3:12b')
+    expect(annotated[1]!.displayName).toBe('Gemma 3 12B (8bit)')
+  })
+
+  it('does not add quantization suffix for exact registry ID matches', () => {
+    const detected: ModelInfo[] = [
+      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', providerId: 'openai', supportsStructuredOutput: true, supportsStreaming: true },
+    ]
+    const annotated = matchDetectedModels(detected, 'openai')
+    expect(annotated[0]!.displayName).toBe('GPT-5.4 Mini')
+  })
+
+  it('adds quantization suffix for MLX translategemma variants', () => {
+    const detected: ModelInfo[] = [
+      { id: 'mlx-community/translategemma-4b-it-4bit', name: 'translategemma-4b-it-4bit', providerId: 'openai-compatible', supportsStructuredOutput: true, supportsStreaming: true },
+      { id: 'mlx-community/translategemma-12b-it-4bit', name: 'translategemma-12b-it-4bit', providerId: 'openai-compatible', supportsStructuredOutput: true, supportsStreaming: true },
+    ]
+    const annotated = matchDetectedModels(detected, 'openai-compatible')
+    expect(annotated[0]!.displayName).toBe('TranslateGemma 4B (4bit)')
+    expect(annotated[1]!.displayName).toBe('TranslateGemma 12B (4bit)')
+  })
 })
 
 // ── resolveExecutionProfile — Experimental Profiles ─────────────
