@@ -132,4 +132,4 @@ cd packages/core && pnpm vitest
 
 ## License
 
-Private — all rights reserved.
+MIT — see [LICENSE](LICENSE) for details.
